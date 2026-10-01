@@ -1,0 +1,52 @@
+{
+  "background": {
+    "file": "background.webp",
+    "width": 1344,
+    "height": 768
+  },
+  "layer-forest": {
+    "file": "layer-forest.webp",
+    "width": 1536,
+    "height": 672
+  },
+  "ball": {
+    "file": "ball.webp",
+    "width": 454,
+    "height": 512
+  },
+  "peg": {
+    "file": "peg.webp",
+    "width": 255,
+    "height": 256
+  },
+  "bucket": {
+    "file": "bucket.webp",
+    "width": 453,
+    "height": 451
+  },
+  "cover": {
+    "file": "cover.webp",
+    "width": 1344,
+    "height": 768
+  },
+  "layer-foliage": {
+    "file": "layer-foliage.webp",
+    "width": 1536,
+    "height": 672
+  },
+  "board": {
+    "file": "board.webp",
+    "width": 1024,
+    "height": 1024
+  },
+  "leaf": {
+    "file": "leaf.webp",
+    "width": 121,
+    "height": 128
+  },
+  "logo": {
+    "file": "logo.webp",
+    "width": 613,
+    "height": 105
+  }
+}

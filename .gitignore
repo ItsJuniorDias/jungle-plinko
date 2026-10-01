@@ -1,0 +1,12 @@
+node_modules
+dist
+.DS_Store
+*.blend1
+.env
+.env.local
+
+# Local tooling
+.claude/
+
+# Raw AI outputs (~14 MB). Kept locally so `npm run art` can re-key without paying again.
+art/raw/

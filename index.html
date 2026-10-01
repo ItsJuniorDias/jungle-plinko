@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1f1630" />
+    <title>Jungle Plinko</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;800;900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="splash" class="splash" style="background-image: url('/art/cover.webp')"><span>Loading…</span></div>
+    <div id="app">
+      <main class="viewport" id="viewport">
+        <div class="history" id="history" role="group" aria-label="Recent results"></div>
+        <div class="toast" id="toast" role="status" aria-live="polite"></div>
+        <div class="big-win" id="big-win" role="status" aria-live="polite">
+          <div class="big-win-card">
+            <p id="big-win-title" class="big-win-title">Big win!</p>
+            <p id="big-win-mult" class="big-win-mult"></p>
+            <p id="big-win-amount" class="big-win-amount"></p>
+          </div>
+        </div>
+      </main>
+
+      <aside class="panel">
+        <header class="brand">
+          <span class="brand-mark">🌿</span>
+          <div>
+            <h1>Jungle Plinko</h1>
+          </div>
+        </header>
+
+        <section class="balance">
+          <span class="label">Demo balance</span>
+          <strong id="balance">—</strong>
+          <button class="ghost small" id="refill" type="button" title="Refill demo balance" aria-label="Refill demo balance">↻</button>
+        </section>
+
+        <label class="field">
+          <span class="label">Bet amount</span>
+          <div class="amount">
+            <span class="prefix">$</span>
+            <input id="amount" type="text" inputmode="decimal" autocomplete="off" aria-label="Bet amount in dollars" value="1.00" />
+            <button type="button" class="ghost small" data-amount="half" aria-label="Halve bet">½</button>
+            <button type="button" class="ghost small" data-amount="double" aria-label="Double bet">2×</button>
+          </div>
+        </label>
+
+        <div class="field">
+          <span class="label">Risk</span>
+          <div class="segmented" id="risk" role="radiogroup" aria-label="Risk">
+            <button type="button" role="radio" data-risk="low" aria-checked="false">Low</button>
+            <button type="button" role="radio" data-risk="medium" aria-checked="true">Medium</button>
+            <button type="button" role="radio" data-risk="high" aria-checked="false">High</button>
+          </div>
+        </div>
+
+        <label class="field">
+          <span class="label">Rows <output id="rows-value">12</output></span>
+          <input id="rows" type="range" min="8" max="16" step="1" value="12" />
+        </label>
+
+        <div class="actions">
+          <button class="primary" id="drop" type="button" title="Drop (Space)" aria-keyshortcuts="Space">Drop <kbd aria-hidden="true">Space</kbd></button>
+          <button class="ghost" id="auto" type="button" aria-pressed="false">Auto</button>
+        </div>
+
+        <footer class="panel-footer">
+          <button class="link" id="open-fair" type="button"><span aria-hidden="true">🔒</span> Provably fair</button>
+          <span id="rtp" class="muted"></span>
+          <button class="link" id="mute" type="button" aria-pressed="false" aria-label="Mute" aria-keyshortcuts="M">🔊</button>
+        </footer>
+      </aside>
+    </div>
+
+    <dialog id="fair-dialog" class="dialog" aria-label="Provably fair">
+      <form method="dialog" class="dialog-head">
+        <h2>Provably fair</h2>
+        <button class="ghost small" aria-label="Close">✕</button>
+      </form>
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="seeds" aria-selected="true">Seeds</button>
+        <button type="button" role="tab" data-tab="verify">Verify</button>
+      </div>
+
+      <section data-panel="seeds">
+        <p class="muted">
+          The server publishes the <b>hash</b> of its seed before you place any bet. When you rotate seeds, the old
+          seed is revealed so you can verify every bet made with it. A new client seed takes effect when you rotate.
+        </p>
+        <label class="field"><span class="label">Active server seed hash</span><input id="fair-hash" readonly /></label>
+        <label class="field"><span class="label">Your client seed</span><input id="fair-client" maxlength="64" /></label>
+        <label class="field"><span class="label">Next nonce</span><input id="fair-nonce" readonly /></label>
+        <button class="primary" id="rotate" type="button">Rotate seeds</button>
+        <div id="revealed" class="revealed" hidden></div>
+      </section>
+
+      <section data-panel="verify" hidden>
+        <label class="field"><span class="label">Server seed (revealed)</span><input id="v-server" /></label>
+        <label class="field"><span class="label">Client seed</span><input id="v-client" /></label>
+        <div class="grid3">
+          <label class="field"><span class="label">Nonce</span><input id="v-nonce" type="number" min="0" value="0" /></label>
+          <label class="field"><span class="label">Rows</span><input id="v-rows" type="number" min="8" max="16" value="12" /></label>
+          <label class="field">
+            <span class="label">Risk</span>
+            <select id="v-risk"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select>
+          </label>
+        </div>
+        <button class="primary" id="verify" type="button">Calculate result</button>
+        <pre id="v-result" class="result"></pre>
+      </section>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

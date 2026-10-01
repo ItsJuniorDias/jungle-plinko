@@ -23,10 +23,13 @@
 - **Server-authoritative.** The server decides each outcome. The client only animates the path it receives.
 - **Pay tables generated from a target RTP.** Multipliers are solved numerically for a 99% target RTP, then rounded down. The real RTP lands between 98.1% and 98.9%, depending on rows and risk. A Monte Carlo script checks it.
 - **3 risk levels × 8–16 rows**, with payouts from 0.2× up to 1000×.
-- **Painterly "Spring" look.** AI-painted sprites and backdrop, bloom, AgX tone mapping, a colour grade, vignette and film grain. Without art, the game falls back to soft toon shading with a rim light. Misty parallax layers, light shafts, drifting pollen and falling leaves.
+- **Painterly "Spring" look.** AI-painted backdrop and textures, warm rim light on every 3D prop, bloom, AgX tone mapping, a colour grade, vignette and film grain. Misty parallax layers, light shafts, drifting pollen, falling leaves and foreground ferns swaying in the wind.
+- **Real 3D props.** The seed ball, spore pegs, bucket plaques, carved stone board and the mascot are AI-generated 3D models (Hyper3D Rodin), cleaned up in Blender. The board wears the crisp 2D painting projected onto the 3D carving, with an organic silhouette cut from the painting's alpha and a travelling light wave along its vines.
+- **A mascot that reacts to every play.** A jungle creature beside the board watches the ball, flinches at peg hits, holds its breath when a ball heads for a big bucket, hops for wins, pirouettes for big wins and slumps on losses. It blinks, smiles with its eyes and droops them when sad. All of it is spring-driven for follow-through, with idle fidgets between plays.
 - **Game feel.**
   - Pegs pop in row by row.
-  - The ball squashes and stretches on every peg, throwing sparks and making the peg pulse.
+  - The ball stretches along its velocity and squashes on every peg, throwing sparks while the peg pulses and sways like a spring.
+  - Bucket plaques swing like a struck gong and send a ripple through their neighbours; the board frame flashes in the bucket's colour.
   - A multiplier floats up from the bucket on every hit of 2× or more, and big hits (10× and up) open a Big / Mega / Epic win banner.
   - Stereo-panned synth sound effects.
 - **AI art pipeline.** One command generates every image with Nano Banana via OpenRouter, keeps a consistent style and keys out the backgrounds. Most missing images fall back to a procedural placeholder.
@@ -108,12 +111,16 @@ src/
     painted.ts          procedural placeholder textures and canvas labels
     art.ts              loads public/art/manifest.json (all entries optional)
     sfx.ts              Web Audio synth sound kit
-  games/plinko/         board, pegs, buckets, ball choreography, win popups
+  games/plinko/
+    PlinkoBoard.ts      board, pegs, buckets, ball choreography, win popups, frame glow
+    Mascot.ts           spring-driven mascot: reactions, idle fidgets, blinking eyelids
   ui/fairness.ts        provably fair dialog (seeds + verifier)
 scripts/
   simulate.ts           Monte Carlo RTP check
   generate-art.ts       AI art generation + chroma keying
-public/art/             game-ready art (WebP) + manifest.json
+public/art/             game-ready 2D art (WebP) + manifest.json
+public/models/          game-ready 3D props (GLB) + manifest.json
+art/models/             Blender source (.blend) of the 3D props
 ```
 
 ### Game server API
@@ -145,9 +152,17 @@ npm run art -- board leaf --force       # regenerate specific assets
 
 Set `IMAGE_MODEL` in `.env` to try another model, for example `google/gemini-3.1-flash-image` (Nano Banana 2).
 
+### 3D props
+
+The 3D models were generated with **Hyper3D Rodin** (image-to-3D) through the Blender MCP, using the 2D art as references (the mascot comes from the cover art), then processed in Blender: decimated for mobile (400–9,000 triangles), centred and normalised to 1 unit, metallic/roughness maps dropped (toon shading only needs colour and normals), exported as GLB with WebP textures. The board additionally gets a second UV set that projects `board.webp` onto the carving. The source file is `art/models/jungle-plinko-props.blend`.
+
+`src/engine/art.ts` loads `public/models/manifest.json`; every model is optional and falls back to the 2D sprite or procedural version.
+
 ## Roadmap
 
 - [x] Plinko: provably fair, RTP-solved tables, Spring-style art and polish
+- [x] AI-generated 3D props and a reacting mascot
+- [ ] Rig the mascot (Mixamo/AccuRIG) for limb and facial animation
 - [ ] Chicken Road with an animated 3D character (GLB + `springify()`)
 - [ ] Crash: real-time multiplayer over WebSocket
 - [ ] Port the server to NestJS + PostgreSQL with an operator wallet API (debit / credit / rollback, idempotent)

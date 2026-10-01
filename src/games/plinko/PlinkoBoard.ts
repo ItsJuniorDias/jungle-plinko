@@ -7,7 +7,7 @@ import * as THREE from "three";
 import gsap from "gsap";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import type { Stage } from "../../engine/stage";
-import { springMaterial } from "../../engine/materials";
+import { addSpringRim, springMaterial, springify } from "../../engine/materials";
 import { labelTexture, softDotTexture } from "../../engine/painted";
 import { ParticleBurst } from "../../engine/particles";
 import type { Art } from "../../engine/art";
@@ -20,6 +20,10 @@ const PEG_R = 0.1;
 const BALL_R = 0.2;
 const SPAWN_H = 1.3;
 const BOARD_WORLD_HEIGHT = 12; // every row count is scaled to this height
+/** Board leans back so the camera sees the depth of the 3D props. */
+const BOARD_TILT = THREE.MathUtils.degToRad(-12);
+/** Light comes from the upper right, so the ball's shadow falls down-left on the slab. */
+const SHADOW_OFFSET = new THREE.Vector2(-0.07, -0.13);
 
 const CENTRE_COLOR = new THREE.Color("#f6d36b");
 const MID_COLOR = new THREE.Color("#f39a52");
@@ -28,6 +32,7 @@ const PEG_IDLE = new THREE.Color(1, 1, 1);
 const PEG_FLASH = new THREE.Color(3.2, 2.5, 1.6);
 const INTRO_ROW_DELAY = 0.035; // pegs pop in row by row when a board is built
 const INTRO_POP = 0.38;
+const WOBBLE_TIME = 0.8;
 /** Multipliers at or above this get a floating "+N×" popup. */
 const POPUP_MIN = 2;
 
@@ -53,6 +58,41 @@ function flash(mat: THREE.Material, strength: number) {
   apply();
 }
 
+/**
+ * A band of light that slowly travels diagonally across the carved frame. It multiplies
+ * the emissive term, which is masked by the painting, so only the vines and carvings glint.
+ * Chained after addSpringRim's shader patch.
+ */
+function addFrameWave(mat: THREE.MeshStandardMaterial, time: { value: number }) {
+  const previous = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    previous.call(mat, shader, renderer);
+    shader.uniforms.uFrameTime = time;
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nuniform float uFrameTime;")
+      .replace(
+        "#include <emissivemap_fragment>",
+        `#include <emissivemap_fragment>
+        float band = pow(0.5 + 0.5 * sin(vMapUv.x * 7.0 + vMapUv.y * 5.0 - uFrameTime * 1.6), 10.0);
+        totalEmissiveRadiance *= 0.6 + 2.2 * band;`,
+      );
+  };
+  mat.customProgramCacheKey = () => "spring-rim-frame-wave";
+}
+
+/** Frame flash strength for ordinary wins: grows with the multiplier, capped. */
+function multiplier2boost(m: number) {
+  return Math.min(0.35 + (m - 1) * 0.12, 1.4);
+}
+
+function firstMesh(root: THREE.Object3D): THREE.Mesh | undefined {
+  let found: THREE.Mesh | undefined;
+  root.traverse((o) => {
+    if (!found && (o as THREE.Mesh).isMesh) found = o as THREE.Mesh;
+  });
+  return found;
+}
+
 export function formatMultiplier(m: number): string {
   return `${m >= 100 ? m.toFixed(0) : m >= 10 ? m.toFixed(1).replace(/\.0$/, "") : String(m)}×`;
 }
@@ -75,7 +115,14 @@ interface Popup {
 
 interface Ball {
   group: THREE.Group;
-  body: THREE.Mesh;
+  /** Squash & stretch pivot: aligned with the velocity, never spins (so squash reads correctly). */
+  body: THREE.Object3D;
+  /** Rolls inside `body`; counter-rotated so the roll is independent of the stretch axis. */
+  spinner: THREE.Object3D;
+  roll: number;
+  fx: { size: number; squash: number };
+  prev: THREE.Vector2;
+  shadow: THREE.Mesh;
   segments: Segment[];
   index: number;
   time: number;
@@ -83,6 +130,7 @@ interface Ball {
   resolve: () => void;
   bucket: number;
   multiplier: number;
+  tensionSent?: boolean;
 }
 
 export class PlinkoBoard {
@@ -90,11 +138,12 @@ export class PlinkoBoard {
   private board = new THREE.Group();
   private pegs?: THREE.InstancedMesh;
   private pegHits: number[] = [];
-  private buckets: { mesh: THREE.Mesh; label: THREE.Mesh; baseY: number }[] = [];
+  private buckets: { mesh: THREE.Object3D; label: THREE.Mesh; baseY: number; mat: THREE.Material }[] = [];
   private balls = new Set<Ball>();
   private popups: Popup[] = [];
   private pegPositions: THREE.Vector3[] = [];
   private pegRows: number[] = [];
+  private pegHitDir: number[] = [];
   private introStart = -10;
   private glowTex = softDotTexture();
   private particles = new ParticleBurst(700, 0.22);
@@ -102,8 +151,33 @@ export class PlinkoBoard {
   private ballMat = springMaterial({ color: "#ffb340", emissive: "#ff7a2a", emissiveIntensity: 0.45, rimColor: "#fff1c4", rimStrength: 0.9 });
   private leafGeo = new THREE.SphereGeometry(0.09, 10, 8).scale(1.6, 0.45, 0.8);
   private leafMat = springMaterial({ color: "#7cc46a", rimColor: "#e8ffc0", rimStrength: 0.5 });
-  /** Painted sprite version of the ball, when AI art is available. */
+  /** Painted sprite version of the ball, when only 2D art is available. */
   private ballSprite?: { geo: THREE.PlaneGeometry; mat: THREE.MeshBasicMaterial };
+  /** AI-generated 3D props (public/models), preferred over sprites when present. */
+  private ballModel?: THREE.Object3D;
+  private pegModel?: { geo: THREE.BufferGeometry; mat: THREE.Material };
+  private bucketModel?: THREE.Object3D;
+  private boardModel?: THREE.Object3D;
+  /** Frame materials (shared by every rebuild's clone) driven by the board glow animations. */
+  private frameMats: THREE.MeshStandardMaterial[] = [];
+  private frameGlow = { boost: 0, color: new THREE.Color("#ffc890") };
+  /** World-space extent of the board frame, for placing things around it (the mascot). */
+  readonly bounds = { halfWidth: 6, bottom: -6 };
+  /** Game-feel hooks (the mascot listens to these). */
+  onDrop?: () => void;
+  onLand?: (multiplier: number) => void;
+  onTension?: () => void;
+  onPegHit?: () => void;
+  private shadowGeo = new THREE.PlaneGeometry(BALL_R * 3.2, BALL_R * 2.2);
+  private shadowMat: THREE.MeshBasicMaterial;
+  /** Contact radii used by the choreography: match the drawn size of the 3D props. */
+  private pegContactR = PEG_R;
+  private ballContactR = BALL_R;
+  private bucketTop = 0.25;
+  /** Time uniform for the travelling light wave along the carved frame. */
+  private frameWave = { value: 0 };
+  /** Geometries/materials shared across rebuilds: never disposed by clearBoard(). */
+  private keep = new Set<unknown>();
   private rows = 0;
   private time = 0;
 
@@ -111,8 +185,72 @@ export class PlinkoBoard {
     private stage: Stage,
     private art?: Art,
   ) {
+    this.shadowMat = new THREE.MeshBasicMaterial({ map: this.glowTex, color: 0x000000, transparent: true, opacity: 0.42, depthWrite: false });
+    this.keep.add(this.shadowGeo).add(this.shadowMat);
+
+    const ballModel = art?.model("ball");
+    if (ballModel) {
+      springify(ballModel, { rimColor: "#fff1c4", rimStrength: 0.85, emissive: "#ff7a2a", emissiveIntensity: 0.22 });
+      ballModel.scale.setScalar(BALL_R * 2.3); // models are normalised to 1 unit
+      this.ballContactR = BALL_R * 1.1;
+      this.protect(ballModel);
+      this.ballModel = ballModel;
+    }
+    const pegModel = art?.model("peg");
+    const pegMesh = pegModel && firstMesh(pegModel);
+    if (pegMesh) {
+      const geo = pegMesh.geometry.clone().scale(PEG_R * 2.5, PEG_R * 2.5, PEG_R * 2.5);
+      const src = pegMesh.material as THREE.MeshStandardMaterial;
+      // Strong warm emissive so the orbs cross the bloom threshold and glow like spores.
+      const mat = springMaterial({ color: "#fff6ea", map: src.map, emissive: "#ffc48a", emissiveIntensity: 1.05, rimColor: "#ffffff", rimStrength: 1 });
+      this.keep.add(geo).add(mat);
+      this.pegModel = { geo, mat };
+      this.pegContactR = PEG_R * 1.25;
+    }
+    const boardModel = art?.model("board");
+    if (boardModel) {
+      // Carved stone frame: PBR (not toon) so the raking key light and the normal map bring
+      // out the carving's relief, plus Spring's warm rim glow and a golden-hour colour tint.
+      boardModel.traverse((o) => {
+        const mat = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+        if (!mat?.isMeshStandardMaterial) return;
+        mat.roughness = 0.9;
+        mat.metalness = 0;
+        mat.color.setRGB(1.0, 0.94, 0.84); // warm golden-hour cast over the painting
+        if (mat.normalMap) mat.normalScale.multiplyScalar(1.6); // keep glTF's flipped Y
+        // Organic silhouette: swap in the painting WITH its alpha and cut along the carved,
+        // rounded frame instead of showing the model's rectangular slab edges.
+        const paint = art?.texture("board");
+        if (paint && mat.map) {
+          const tex = paint.clone();
+          tex.flipY = mat.map.flipY;
+          tex.channel = mat.map.channel;
+          tex.needsUpdate = true;
+          mat.map = tex;
+          mat.alphaTest = 0.5;
+          this.keep.add(tex);
+        }
+        // The painting doubles as an emissive map: the carved vines can "breathe" and flash.
+        mat.emissiveMap = mat.map;
+        mat.emissive.set("#ffc890");
+        mat.emissiveIntensity = 0.06;
+        addSpringRim(mat, "#ffcf8a", 0.55, 2.4);
+        addFrameWave(mat, this.frameWave);
+        this.frameMats.push(mat);
+      });
+      this.protect(boardModel);
+      this.boardModel = boardModel;
+    }
+    const bucketModel = art?.model("bucket");
+    if (bucketModel) {
+      bucketModel.scale.setScalar(S * 0.92);
+      this.bucketTop = (S * 0.92 * 0.966) / 2; // plaque is ~0.97 as tall as wide
+      this.protect(bucketModel, false); // each bucket gets its own tinted material
+      this.bucketModel = bucketModel;
+    }
+
     const ballTex = art?.texture("ball");
-    if (ballTex) {
+    if (ballTex && !ballModel) {
       const h = BALL_R * 2.8;
       this.ballSprite = {
         geo: new THREE.PlaneGeometry(h * art!.aspect("ball"), h),
@@ -123,6 +261,22 @@ export class PlinkoBoard {
     this.root.add(this.board);
     this.board.add(this.particles.points);
     stage.onUpdate((dt) => this.update(dt));
+  }
+
+  private protect(root: THREE.Object3D, materials = true) {
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      this.keep.add(mesh.geometry);
+      if (materials) this.keep.add(mesh.material);
+    });
+  }
+
+  /** World X of the ball furthest down the board (what the mascot watches), or null. */
+  watchX(): number | null {
+    let best: Ball | undefined;
+    for (const b of this.balls) if (!best || b.index > best.index) best = b;
+    return best ? best.group.getWorldPosition(new THREE.Vector3()).x : null;
   }
 
   get activeBalls() {
@@ -141,9 +295,11 @@ export class PlinkoBoard {
     // Backing slab so the pegs read against the busy painted background:
     // the painted stone board when available, otherwise a soft dark panel.
     const boardTex = this.art?.texture("board");
-    // The painted board has a thick carved frame: grow it so pegs sit on the smooth inner area.
-    const framePad = boardTex ? 1.24 : 1;
-    const slab = boardTex
+    // The painted/3D board has a thick carved frame: grow it so pegs sit on the smooth inner area.
+    const framePad = this.boardModel || boardTex ? 1.24 : 1;
+    const slab: THREE.Object3D = this.boardModel
+      ? this.boardModel.clone(true)
+      : boardTex
       ? new THREE.Mesh(
           new THREE.PlaneGeometry(boardWidth * framePad, boardHeight * framePad),
           new THREE.MeshBasicMaterial({ map: boardTex, transparent: true, opacity: 0.94, depthWrite: false }),
@@ -152,13 +308,31 @@ export class PlinkoBoard {
           new RoundedBoxGeometry(boardWidth, boardHeight, 0.1, 4, 0.5),
           new THREE.MeshBasicMaterial({ color: "#1a1028", transparent: true, opacity: this.art?.texture("background") ? 0.72 : 0.38, depthWrite: false }),
         );
-    slab.position.set(0, (top + bottom) / 2, -0.4);
+    if (this.boardModel) {
+      // Normalised model (≈1×1, depth ≈0.15): stretch to the board, carved face just behind the pegs.
+      const depth = 3.2;
+      slab.scale.set(boardWidth * framePad, boardHeight * framePad, depth);
+      slab.position.set(0, (top + bottom) / 2, -0.45 - 0.074 * depth);
+      // Dark glassy inner panel over the carved stone so pegs and buckets read clearly.
+      const panel = new THREE.Mesh(
+        new RoundedBoxGeometry(boardWidth, boardHeight, 0.02, 4, 0.45),
+        new THREE.MeshBasicMaterial({ color: "#140c22", transparent: true, opacity: 0.35, depthWrite: false }),
+      );
+      panel.position.set(0, (top + bottom) / 2, -0.42);
+      panel.renderOrder = -2; // the tilt would otherwise sort it over the ball's shadow/halo
+      this.board.add(panel);
+    } else {
+      slab.position.set(0, (top + bottom) / 2, -0.4);
+      slab.renderOrder = -2;
+    }
     this.board.add(slab);
 
     // Pegs: one instanced draw call. Row r has r + 3 pegs.
     const pegCount = Array.from({ length: rows }, (_, r) => r + 3).reduce((a, b) => a + b, 0);
     const pegTex = this.art?.texture("peg");
-    this.pegs = pegTex
+    this.pegs = this.pegModel
+      ? new THREE.InstancedMesh(this.pegModel.geo, this.pegModel.mat, pegCount)
+      : pegTex
       ? new THREE.InstancedMesh(
           new THREE.PlaneGeometry(PEG_R * 2.8, PEG_R * 2.8),
           new THREE.MeshBasicMaterial({ map: pegTex, transparent: true, depthWrite: false, color: new THREE.Color(1.4, 1.3, 1.2) }),
@@ -179,6 +353,7 @@ export class PlinkoBoard {
       }
     }
     this.pegHits = new Array(pegCount).fill(-10);
+    this.pegHitDir = new Array(pegCount).fill(1);
     this.introStart = this.time;
     this.updatePegMatrices(true);
     this.board.add(this.pegs);
@@ -192,18 +367,34 @@ export class PlinkoBoard {
     for (let k = 0; k <= rows; k++) {
       const color = bucketColor(k, rows);
       const edge = Math.abs(k - rows / 2) / (rows / 2);
-      const material = bucketTex
-        ? new THREE.MeshBasicMaterial({ map: bucketTex, color, transparent: true, depthWrite: false })
-        : springMaterial({ color, emissive: color, emissiveIntensity: 0.15 + edge * 0.35, rimColor: "#fff3d6", rimStrength: 0.5 });
-      material.userData.base = bucketTex ? color.clone() : (material as THREE.MeshToonMaterial).emissiveIntensity;
-      const mesh = new THREE.Mesh(bucketGeo, material);
+      const glow = 0.15 + edge * 0.35;
+      let mesh: THREE.Object3D;
+      let material: THREE.Material;
+      let labelZ: number;
+      if (this.bucketModel) {
+        // 3D carved plaque: its painted texture tinted by the bucket colour (toon colour × map).
+        const pivot = new THREE.Group();
+        const plaque = this.bucketModel.clone(true);
+        springify(plaque, { color, emissive: color, emissiveIntensity: glow, rimColor: "#fff3d6", rimStrength: 0.55 });
+        pivot.add(plaque);
+        mesh = pivot;
+        material = firstMesh(plaque)!.material as THREE.Material;
+        labelZ = 0.26;
+      } else {
+        material = bucketTex
+          ? new THREE.MeshBasicMaterial({ map: bucketTex, color, transparent: true, depthWrite: false })
+          : springMaterial({ color, emissive: color, emissiveIntensity: glow, rimColor: "#fff3d6", rimStrength: 0.5 });
+        mesh = new THREE.Mesh(bucketGeo, material);
+        labelZ = bucketTex ? 0.02 : 0.24;
+      }
+      material.userData.base = material instanceof THREE.MeshBasicMaterial ? color.clone() : glow;
       const baseY = this.bucketY();
       mesh.position.set(this.bucketX(k), baseY, 0);
       const label = new THREE.Mesh(labelGeo, new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }));
-      label.position.z = bucketTex ? 0.02 : 0.24;
+      label.position.z = labelZ;
       mesh.add(label);
       this.board.add(mesh);
-      this.buckets.push({ mesh, label, baseY });
+      this.buckets.push({ mesh, label, baseY, mat: material });
     }
     this.setRisk(risk);
 
@@ -211,10 +402,16 @@ export class PlinkoBoard {
     const scale = BOARD_WORLD_HEIGHT / boardHeight;
     this.board.scale.setScalar(scale);
     this.board.position.y = (-(top + bottom) / 2) * scale;
+    this.board.rotation.x = BOARD_TILT;
+    this.bounds.halfWidth = (boardWidth * framePad * scale) / 2;
+    this.bounds.bottom = this.board.position.y + (bottom - (boardHeight * (framePad - 1)) / 2) * scale;
+    // The tilt brings the bottom edge towards the camera (and the 3D frame has depth),
+    // so leave extra vertical room and aim slightly low.
+    const tiltRoom = this.boardModel ? 1.1 : 1.04;
     this.stage.frame(
       Math.max(boardWidth * framePad * scale, 9),
-      BOARD_WORLD_HEIGHT * framePad + 0.4,
-      undefined,
+      BOARD_WORLD_HEIGHT * framePad * tiltRoom + 0.4,
+      new THREE.Vector3(0, -0.35, 0),
       boardWidth * 1.04 * scale, // portrait: keep pegs + buckets, let the frame crop
     );
 
@@ -242,17 +439,28 @@ export class PlinkoBoard {
   drop(path: number[], multiplier: number): Promise<void> {
     if (path.length !== this.rows) throw new Error("path does not match board rows");
     const group = new THREE.Group();
-    let body: THREE.Mesh;
-    if (this.ballSprite) {
-      body = new THREE.Mesh(this.ballSprite.geo, this.ballSprite.mat);
+    const body = new THREE.Group();
+    const spinner = new THREE.Group();
+    body.add(spinner);
+    if (this.ballModel) {
+      const seed = this.ballModel.clone(true);
+      seed.rotation.y = Math.random() * Math.PI * 2;
+      spinner.add(seed);
+    } else if (this.ballSprite) {
+      spinner.add(new THREE.Mesh(this.ballSprite.geo, this.ballSprite.mat));
     } else {
-      body = new THREE.Mesh(this.ballGeo, this.ballMat);
+      spinner.add(new THREE.Mesh(this.ballGeo, this.ballMat));
       const leaf = new THREE.Mesh(this.leafGeo, this.leafMat);
       leaf.position.set(0.05, BALL_R * 0.95, 0);
       leaf.rotation.z = -0.5;
-      body.add(leaf);
+      spinner.add(leaf);
     }
     group.add(body);
+    // Soft contact shadow on the slab, under everything else on the board.
+    const shadow = new THREE.Mesh(this.shadowGeo, this.shadowMat);
+    shadow.position.z = -0.37;
+    shadow.renderOrder = -1;
+    this.board.add(shadow);
     // Warm halo behind the ball; additive so bloom turns it into a soft glow.
     const halo = new THREE.Sprite(
       new THREE.SpriteMaterial({ map: this.glowTex, color: "#ffb04a", transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending }),
@@ -269,7 +477,7 @@ export class PlinkoBoard {
       const dir = path[r] === 1 ? 1 : -1;
       const pegJ = rights + 1;
       // Contact slightly off the peg's crown, on the side the ball will roll off.
-      const contact = new THREE.Vector2(this.pegX(r, pegJ) + dir * 0.17 * S, this.rowY(r) + PEG_R + BALL_R * 0.85);
+      const contact = new THREE.Vector2(this.pegX(r, pegJ) + dir * 0.17 * S, this.rowY(r) + this.pegContactR + this.ballContactR * 0.85);
       if (r === 0) {
         prev = new THREE.Vector2(contact.x, this.rowY(0) + SPAWN_H);
         segments.push({ from: prev, to: contact, duration: 0.34, arc: 0, hitRow: 0, hitPeg: this.pegIndex(0, pegJ) });
@@ -286,15 +494,35 @@ export class PlinkoBoard {
       prev = contact;
       rights += path[r];
     }
-    const landing = new THREE.Vector2(this.bucketX(rights), this.bucketY() + 0.32);
+    // Land on the plaque's top edge (the 3D plaque is taller than the old flat bucket).
+    const landing = new THREE.Vector2(this.bucketX(rights), this.bucketY() + this.bucketTop + this.ballContactR * 0.5);
     segments.push({ from: prev, to: landing, duration: 0.24, arc: ROW_H * 0.2, hitRow: -1, hitPeg: -1 });
 
     group.position.set(segments[0].from.x, segments[0].from.y, 0.05);
-    gsap.from(body.scale, { x: 0, y: 0, z: 0, duration: 0.25, ease: "back.out(3)" });
+    const fx = { size: 0, squash: 0 };
+    gsap.to(fx, { size: 1, duration: 0.25, ease: "back.out(3)" });
     sfx.drop();
+    this.onDrop?.();
+    // Tiny nudge: the board "feels" the ball being released.
+    gsap.fromTo(this.root.rotation, { x: -0.012 }, { x: 0, duration: 0.5, ease: "elastic.out(1.2, 0.4)", overwrite: true });
 
     return new Promise((resolve) => {
-      this.balls.add({ group, body, segments, index: 0, time: 0, dir: path[0] ? 1 : -1, resolve, bucket: rights, multiplier });
+      this.balls.add({
+        group,
+        body,
+        spinner,
+        roll: 0,
+        fx,
+        prev: segments[0].from.clone(),
+        shadow,
+        segments,
+        index: 0,
+        time: 0,
+        dir: path[0] ? 1 : -1,
+        resolve,
+        bucket: rights,
+        multiplier,
+      });
     });
   }
 
@@ -314,13 +542,18 @@ export class PlinkoBoard {
         ball.dir = Math.sign(seg.to.x - seg.from.x) || ball.dir;
       }
       if (ball.index >= ball.segments.length) continue;
+      // Two rows from the bottom and heading for a big bucket: let the mascot hold its breath.
+      if (!ball.tensionSent && ball.multiplier >= 5 && ball.index >= this.rows - 2) {
+        ball.tensionSent = true;
+        this.onTension?.();
+      }
 
       const t = ball.time / seg.duration;
       const x = THREE.MathUtils.lerp(seg.from.x, seg.to.x, t);
       const y = seg.from.y + (seg.to.y - seg.from.y) * t * t + seg.arc * 4 * t * (1 - t);
       ball.group.position.x = x;
       ball.group.position.y = y;
-      ball.body.rotation.z -= ball.dir * dt * 9;
+      this.applyBallMotion(ball, x, y, dt);
       if (Math.random() < 0.6) this.particles.emit(ball.group.position, 1, "#ffc46b", 0.4, Math.PI * 2, 0.5);
     }
 
@@ -340,6 +573,16 @@ export class PlinkoBoard {
 
     this.updatePegMatrices(false);
 
+    // Frame glow: slow idle "breathing", a travelling light wave, plus any landing flash.
+    this.frameWave.value = this.time;
+    if (this.frameMats.length) {
+      const breathe = 0.06 + 0.035 * (0.5 + 0.5 * Math.sin(this.time * 1.3));
+      for (const m of this.frameMats) {
+        m.emissiveIntensity = breathe + this.frameGlow.boost;
+        m.emissive.copy(this.frameGlow.color);
+      }
+    }
+
     // Peg flash decay.
     if (this.pegs) {
       const c = new THREE.Color();
@@ -355,22 +598,26 @@ export class PlinkoBoard {
     }
   }
 
-  /** Peg scale: row-by-row intro pop + a quick pulse when hit. Skips work when idle. */
+  /** Peg transform: row-by-row intro pop, a quick pulse and a springy wobble when hit. Skips work when idle. */
   private updatePegMatrices(force: boolean) {
     if (!this.pegs) return;
     const introEnd = this.introStart + this.rows * INTRO_ROW_DELAY + INTRO_POP;
     const introActive = this.time < introEnd;
-    const anyHit = this.pegHits.some((h) => this.time - h < 0.3);
+    const anyHit = this.pegHits.some((h) => this.time - h < WOBBLE_TIME);
     if (!force && !introActive && !anyHit && !this.pegs.userData.dirty) return;
     this.pegs.userData.dirty = introActive || anyHit; // one more pass after activity settles
 
     const m = new THREE.Matrix4();
     const scale = new THREE.Vector3();
     const q = new THREE.Quaternion();
+    const euler = new THREE.Euler();
     this.pegPositions.forEach((pos, i) => {
       const intro = Math.min(Math.max((this.time - this.introStart - this.pegRows[i] * INTRO_ROW_DELAY) / INTRO_POP, 0), 1);
       const hitAge = this.time - this.pegHits[i];
       const pulse = hitAge < 0.3 ? 0.45 * Math.exp(-hitAge * 14) : 0;
+      // Damped spring: the peg sways away from the ball, overshoots and settles.
+      const wobble = hitAge < WOBBLE_TIME ? 0.55 * Math.exp(-hitAge * 6) * Math.sin(hitAge * 26) : 0;
+      q.setFromEuler(euler.set(wobble * 0.5, 0, -wobble * this.pegHitDir[i]));
       scale.setScalar(Math.max(easeOutBack(intro), 0) * (1 + pulse));
       this.pegs!.setMatrixAt(i, m.compose(pos, q, scale));
     });
@@ -380,14 +627,12 @@ export class PlinkoBoard {
   private onSegmentEnd(ball: Ball, seg: Segment) {
     if (seg.hitRow >= 0) {
       this.pegHits[seg.hitPeg] = this.time;
+      this.pegHitDir[seg.hitPeg] = ball.dir;
       sfx.peg(seg.hitRow, THREE.MathUtils.clamp(ball.group.position.x / (this.rows / 2 + 1), -1, 1));
       this.particles.emit(new THREE.Vector3(seg.to.x, seg.to.y - BALL_R * 0.6, 0.1), 3, "#fff0c4", 1.6, Math.PI * 1.4, 0.8);
-      // Squash on impact, then spring back with overshoot (follow-through).
-      gsap.fromTo(
-        ball.body.scale,
-        { x: 1.28, y: 0.72, z: 1.1 },
-        { x: 1, y: 1, z: 1, duration: 0.32, ease: "elastic.out(1.1, 0.45)", overwrite: true },
-      );
+      // Squash on impact (along the incoming velocity), then spring back with overshoot.
+      gsap.fromTo(ball.fx, { squash: 0.3 }, { squash: 0, duration: 0.34, ease: "elastic.out(1.1, 0.45)", overwrite: "auto" });
+      this.onPegHit?.();
       return;
     }
     this.land(ball);
@@ -402,25 +647,86 @@ export class PlinkoBoard {
     // Bucket gets "pushed" down and bounces back; label pops.
     gsap.fromTo(bucket.mesh.position, { y: bucket.baseY - 0.22 }, { y: bucket.baseY, duration: 0.5, ease: "elastic.out(1.2, 0.35)", overwrite: true });
     gsap.fromTo(bucket.mesh.scale, { x: 1.15, y: 0.8 }, { x: 1, y: 1, duration: 0.45, ease: "elastic.out(1.2, 0.4)", overwrite: true });
-    flash(bucket.mesh.material as THREE.Material, win ? 1 : 0.35);
+    // 3D plaque swings round on its axis like a struck gong, harder for bigger wins.
+    const swing = (win ? 0.9 : 0.4) * ball.dir * (big ? 1.6 : 1);
+    gsap.fromTo(bucket.mesh.rotation, { y: swing }, { y: 0, duration: 0.9, ease: "elastic.out(1.1, 0.3)", overwrite: true });
+    // Ripple: neighbours bob in turn, fading with distance.
+    for (let d = 1; d <= 2; d++) {
+      for (const side of [-1, 1]) {
+        const nb = this.buckets[ball.bucket + side * d];
+        if (!nb) continue;
+        gsap.fromTo(
+          nb.mesh.position,
+          { y: nb.baseY - 0.14 / d },
+          { y: nb.baseY, duration: 0.5, delay: 0.05 * d, ease: "elastic.out(1.2, 0.4)", overwrite: true },
+        );
+      }
+    }
+    flash(bucket.mat, win ? 1 : 0.35);
 
     const origin = new THREE.Vector3(bucket.mesh.position.x, bucket.baseY + 0.3, 0.2);
     this.particles.emit(origin, win ? (big ? 70 : 28) : 8, win ? color : "#b9a6d8", big ? 7 : 4, Math.PI * 0.9, 1.4);
     if (big) this.stage.addShake(0.35);
+    if (win) this.glowFrame(color, big ? 3.2 : multiplier2boost(ball.multiplier), big ? 3 : 1);
+    if (big) {
+      gsap.fromTo(this.root.scale, { x: 1.035, y: 1.035, z: 1.035 }, { x: 1, y: 1, z: 1, duration: 0.7, ease: "elastic.out(1.3, 0.35)", overwrite: true });
+    }
     sfx.land(ball.multiplier);
+    this.onLand?.(ball.multiplier);
     if (ball.multiplier >= POPUP_MIN) this.popup(ball.multiplier, bucket.mesh.position.x, bucket.baseY + 0.45, color);
 
-    // Ball dissolves into the bucket.
-    gsap.to(ball.body.scale, {
-      x: 0,
-      y: 0,
-      z: 0,
+    // Ball dissolves into the bucket (its shadow shrinks with it).
+    gsap.to(ball.fx, {
+      size: 0,
+      squash: 0,
       duration: 0.18,
+      onUpdate: () => this.applyBallMotion(ball, ball.group.position.x, ball.group.position.y, 0),
       ease: "back.in(2)",
-      onComplete: () => this.board.remove(ball.group),
+      onComplete: () => {
+        this.board.remove(ball.group);
+        this.board.remove(ball.shadow);
+      },
     });
     this.balls.delete(ball);
     ball.resolve();
+  }
+
+  /**
+   * Velocity-aligned squash & stretch: the pivot points along the motion, stretches with
+   * speed and squashes on impact; the spinner inside is counter-rotated so the seed keeps
+   * rolling naturally whatever the stretch axis.
+   */
+  private applyBallMotion(ball: Ball, x: number, y: number, dt: number) {
+    if (dt > 0) {
+      const vx = (x - ball.prev.x) / dt;
+      const vy = (y - ball.prev.y) / dt;
+      const speed = Math.hypot(vx, vy);
+      if (speed > 0.5) ball.body.rotation.z = Math.atan2(vy, vx) - Math.PI / 2;
+      ball.body.userData.stretch = Math.min(speed * 0.014, 0.18);
+      ball.roll -= ball.dir * dt * (this.ballModel ? 6 : 9);
+      if (this.ballModel) ball.spinner.rotation.y += dt * 2.2;
+      ball.prev.set(x, y);
+    }
+    const stretch = (ball.body.userData.stretch as number | undefined) ?? 0;
+    const { size, squash } = ball.fx;
+    const along = 1 + stretch - squash;
+    const across = 1 / Math.sqrt(Math.max(along, 0.4)); // keep the volume
+    ball.body.scale.set(size * across, size * along, size * across);
+    ball.spinner.rotation.z = ball.roll - ball.body.rotation.z;
+    ball.shadow.position.set(x + SHADOW_OFFSET.x, y + SHADOW_OFFSET.y, ball.shadow.position.z);
+    ball.shadow.scale.setScalar(size);
+  }
+
+  /** Flash the carved frame in the bucket's colour; `pulses` > 1 throbs for big wins. */
+  private glowFrame(color: THREE.Color, strength: number, pulses: number) {
+    if (!this.frameMats.length) return;
+    gsap.killTweensOf(this.frameGlow);
+    this.frameGlow.color.copy(color).lerp(new THREE.Color("#fff1d0"), 0.35);
+    const tl = gsap.timeline({ onComplete: () => this.frameGlow.color.set("#ffc890") });
+    for (let i = 0; i < pulses; i++) {
+      tl.to(this.frameGlow, { boost: strength * (1 - i * 0.2), duration: 0.08, ease: "power2.out" })
+        .to(this.frameGlow, { boost: 0, duration: pulses > 1 ? 0.35 : 0.7, ease: "power2.in" });
+    }
   }
 
   private popup(multiplier: number, x: number, y: number, color: THREE.Color) {
@@ -441,9 +747,9 @@ export class PlinkoBoard {
         const mesh = o as THREE.Mesh;
         if (!mesh.isMesh) return;
         const shared: unknown[] = [this.ballGeo, this.leafGeo, this.ballSprite?.geo, this.ballMat, this.leafMat, this.ballSprite?.mat];
-        if (!shared.includes(mesh.geometry)) mesh.geometry.dispose();
+        if (!shared.includes(mesh.geometry) && !this.keep.has(mesh.geometry)) mesh.geometry.dispose();
         const mat = mesh.material as THREE.Material & { map?: THREE.Texture | null };
-        if (!shared.includes(mat)) {
+        if (!shared.includes(mat) && !this.keep.has(mat)) {
           // Painted art textures are shared across rebuilds; only canvas labels are per-board.
           if (mat.map instanceof THREE.CanvasTexture) mat.map.dispose();
           mat.dispose();

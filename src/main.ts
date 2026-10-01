@@ -5,6 +5,7 @@ import { createSpringEnvironment } from "./engine/environment";
 import { loadArt } from "./engine/art";
 import { sfx } from "./engine/sfx";
 import { PlinkoBoard, bucketColor, formatMultiplier } from "./games/plinko/PlinkoBoard";
+import { Mascot } from "./games/plinko/Mascot";
 import { setupFairness } from "./ui/fairness";
 import { api, ApiError, type PlinkoBetResult } from "./api";
 import { tableRtp, type Risk } from "../shared/plinko";
@@ -46,6 +47,19 @@ async function boot() {
   const stage = new Stage($("viewport"));
   createSpringEnvironment(stage, art);
   const board = new PlinkoBoard(stage, art);
+  const mascotModel = art.model("mascot");
+  const mascot = mascotModel ? new Mascot(stage, mascotModel) : undefined;
+  if (mascot) {
+    board.onDrop = () => mascot.onDrop();
+    board.onTension = () => mascot.onTension();
+    board.onLand = (m) => mascot.onLand(m);
+    board.onPegHit = () => board.activeBalls === 1 && mascot.onPegHit();
+    stage.onUpdate(() => mascot.watch(board.watchX()));
+  }
+  const rebuild = (r: number, k: Risk) => {
+    board.build(r, k);
+    mascot?.place(board.bounds.halfWidth, board.bounds.bottom);
+  };
 
   let rows = Number($<HTMLInputElement>("rows").value);
   let risk: Risk = "medium";
@@ -83,7 +97,10 @@ async function boot() {
     $("drop").title = tooMuch ? "Insufficient balance" : "Drop (Space)";
   }
   const renderRtp = () => ($("rtp").textContent = `RTP ${(tableRtp(rows, risk) * 100).toFixed(2)}%`);
-  const updateRowsLock = () => (rowsEl.disabled = board.activeBalls > 0);
+  // Rows can't change while a bet is in flight (request pending or ball falling):
+  // the server's path is for the board the bet was placed on.
+  let pendingBets = 0;
+  const updateRowsLock = () => (rowsEl.disabled = board.activeBalls > 0 || pendingBets > 0);
 
   let toastTimer: number | undefined;
   function toast(message: string) {
@@ -146,6 +163,8 @@ async function boot() {
 
   async function dropOne(): Promise<boolean> {
     const amount = amountCents();
+    pendingBets++;
+    updateRowsLock();
     try {
       const bet = await api.bet(amount, rows, risk);
       displayBalance -= bet.amount;
@@ -164,6 +183,9 @@ async function boot() {
     } catch (err) {
       toast(errorMessage(err));
       return false;
+    } finally {
+      pendingBets--;
+      updateRowsLock();
     }
   }
 
@@ -174,7 +196,7 @@ async function boot() {
     autoBtn.textContent = "Auto";
   }
 
-  if (import.meta.env.DEV) Object.assign(window, { __game: { stage, board, showBigWin } });
+  if (import.meta.env.DEV) Object.assign(window, { __game: { stage, board, showBigWin, mascot } });
 
   // --- Controls -------------------------------------------------------------
   $("drop").addEventListener("click", () => void dropOne());
@@ -223,7 +245,7 @@ async function boot() {
   rowsEl.addEventListener("input", () => {
     rows = Number(rowsEl.value);
     $("rows-value").textContent = String(rows);
-    board.build(rows, risk);
+    rebuild(rows, risk);
     renderRtp();
   });
 
@@ -248,7 +270,7 @@ async function boot() {
   renderMute();
 
   // --- Start ----------------------------------------------------------------
-  board.build(rows, risk);
+  rebuild(rows, risk);
   renderRtp();
   try {
     const state = await api.session();

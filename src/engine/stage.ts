@@ -111,6 +111,16 @@ export class Stage {
     this.fitCamera();
   }
 
+  /**
+   * Half width/height of the framed view at depth `z`, from the resting camera (ignores
+   * sway, shake and pointer parallax), so layout derived from it never jitters.
+   */
+  viewHalfSize(z: number): { halfW: number; halfH: number } {
+    const dist = this.baseCameraPos.z - z;
+    const halfH = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * dist;
+    return { halfW: halfH * this.camera.aspect, halfH };
+  }
+
   /** Small camera kick for impacts (big wins, landings). */
   addShake(amount: number) {
     if (reducedMotion) return;

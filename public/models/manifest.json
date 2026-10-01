@@ -1,0 +1,22 @@
+{
+  "ball": {
+    "file": "ball.glb",
+    "tris": 3000
+  },
+  "bucket": {
+    "file": "bucket.glb",
+    "tris": 1600
+  },
+  "peg": {
+    "file": "peg.glb",
+    "tris": 400
+  },
+  "board": {
+    "file": "board.glb",
+    "tris": 7000
+  },
+  "mascot": {
+    "file": "mascot.glb",
+    "tris": 9000
+  }
+}

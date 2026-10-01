@@ -8,6 +8,27 @@ import type { Stage } from "./stage";
 import type { Art } from "./art";
 import { lightShaftTexture, mulberry32, ridgeTexture, skyTexture, softDotTexture } from "./painted";
 
+/**
+ * Vertex sway for a painted foliage card: leaves bend more the higher they reach, with
+ * a slow gust travelling across the screen and a faster flutter on top.
+ */
+function swayInWind(material: THREE.MeshBasicMaterial, time: { value: number }) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uWind = time;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nuniform float uWind;")
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        float reach = smoothstep(0.0, 0.85, uv.y);
+        float gust = 0.6 + 0.4 * sin(uWind * 0.35 - position.x * 0.06);
+        transformed.x += (sin(uWind * 1.1 + position.x * 0.25) * 0.35 + sin(uWind * 3.3 + position.x * 0.9) * 0.06) * reach * gust;
+        transformed.y += sin(uWind * 1.7 + position.x * 0.4) * 0.05 * reach;`,
+      );
+  };
+  material.customProgramCacheKey = () => "foliage-wind";
+}
+
 export function createSpringEnvironment(stage: Stage, art?: Art) {
   const { scene } = stage;
   const root = new THREE.Group();
@@ -22,6 +43,8 @@ export function createSpringEnvironment(stage: Stage, art?: Art) {
       new THREE.MeshBasicMaterial({ map, transparent: true, depthWrite: false, fog: false, ...extra }),
     );
     mesh.position.set(0, y, z);
+    // Always behind the board: the board's transparent panels use renderOrder -2.
+    mesh.renderOrder = -10;
     root.add(mesh);
     return mesh;
   };
@@ -45,7 +68,16 @@ export function createSpringEnvironment(stage: Stage, art?: Art) {
       : plane(95, 38, ridgeTexture(21, "#24485a", "#6d5a52", 40, true), -19, -12.5),
   );
   const foliage = art?.texture("layer-foliage");
-  if (foliage) ridges.push(plane(46, 46 / art!.aspect("layer-foliage"), foliage, -3, -4.5));
+  const wind = { value: 0 };
+  if (foliage) {
+    const w = 46;
+    const h = w / art!.aspect("layer-foliage");
+    const mesh = plane(w, h, foliage, -3, -4.5);
+    mesh.geometry.dispose();
+    mesh.geometry = new THREE.PlaneGeometry(w, h, 48, 12);
+    swayInWind(mesh.material as THREE.MeshBasicMaterial, wind);
+    ridges.push(mesh);
+  }
 
   // --- Light shafts --------------------------------------------------------
   const shaftTex = lightShaftTexture();
@@ -114,6 +146,7 @@ export function createSpringEnvironment(stage: Stage, art?: Art) {
   scene.fog = new THREE.Fog("#e9b98a", 34, 90);
 
   stage.onUpdate((dt, t) => {
+    wind.value = t;
     const attr = pollenGeo.getAttribute("position") as THREE.BufferAttribute;
     for (let i = 0; i < count; i++) {
       const s = seeds[i];

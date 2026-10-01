@@ -150,7 +150,7 @@ export function labelTexture(text: string, color: string, width = 256, height = 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.lineWidth = height * 0.1;
-  ctx.strokeStyle = "rgba(40,24,30,0.55)";
+  ctx.strokeStyle = "rgba(40,24,30,0.85)";
   ctx.strokeText(text, width / 2, height / 2 + 4);
   ctx.fillStyle = color;
   ctx.fillText(text, width / 2, height / 2 + 4);

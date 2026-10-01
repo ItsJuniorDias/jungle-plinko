@@ -26,6 +26,7 @@ export interface SpringMaterialOptions {
   emissive?: THREE.ColorRepresentation;
   emissiveIntensity?: number;
   map?: THREE.Texture | null;
+  normalMap?: THREE.Texture | null;
 }
 
 export function springMaterial(opts: SpringMaterialOptions): THREE.MeshToonMaterial {
@@ -35,12 +36,22 @@ export function springMaterial(opts: SpringMaterialOptions): THREE.MeshToonMater
     emissive: opts.emissive ?? 0x000000,
     emissiveIntensity: opts.emissiveIntensity ?? 1,
     map: opts.map ?? null,
+    normalMap: opts.normalMap ?? null,
   });
-  addRim(material, opts.rimColor ?? 0xffd9a0, opts.rimStrength ?? 0.6, opts.rimPower ?? 2.6);
+  addSpringRim(material, opts.rimColor ?? 0xffd9a0, opts.rimStrength ?? 0.6, opts.rimPower ?? 2.6);
   return material;
 }
 
-function addRim(material: THREE.MeshToonMaterial, color: THREE.ColorRepresentation, strength: number, power: number) {
+/**
+ * Adds the warm fresnel rim to a lit material (toon or PBR). PBR surfaces that need
+ * real relief (e.g. the carved board) still get the Spring edge glow this way.
+ */
+export function addSpringRim(
+  material: THREE.MeshToonMaterial | THREE.MeshStandardMaterial,
+  color: THREE.ColorRepresentation,
+  strength: number,
+  power: number,
+) {
   const uniforms = {
     rimColor: { value: new THREE.Color(color) },
     rimStrength: { value: strength },
@@ -70,12 +81,16 @@ export function springify(root: THREE.Object3D, rim?: Partial<SpringMaterialOpti
     const mesh = obj as THREE.Mesh;
     if (!mesh.isMesh) return;
     const src = mesh.material as THREE.MeshStandardMaterial;
-    mesh.material = springMaterial({
+    const material = springMaterial({
       color: src.color ?? 0xffffff,
       map: src.map,
+      normalMap: src.normalMap,
       emissive: src.emissive,
       emissiveIntensity: src.emissiveIntensity,
       ...rim,
     });
+    // glTF normal maps come with normalScale.y = -1 from GLTFLoader; keep that orientation.
+    if (src.normalScale) material.normalScale.copy(src.normalScale);
+    mesh.material = material;
   });
 }

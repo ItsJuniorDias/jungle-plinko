@@ -4,7 +4,7 @@ import { Stage } from "./engine/stage";
 import { createSpringEnvironment } from "./engine/environment";
 import { loadArt } from "./engine/art";
 import { sfx } from "./engine/sfx";
-import { PlinkoBoard, formatMultiplier, multiplierColor } from "./games/plinko/PlinkoBoard";
+import { PlinkoBoard, bucketColor, formatMultiplier } from "./games/plinko/PlinkoBoard";
 import { Mascot } from "./games/plinko/Mascot";
 import { setupFairness } from "./ui/fairness";
 import { api, ApiError, type PlinkoBetResult } from "./api";
@@ -35,7 +35,7 @@ const ERRORS: Record<string, string> = {
 
 async function boot() {
   // Labels on the buckets are drawn to canvases, so the font must be ready first.
-  await Promise.all(['800 40px "Nunito"', '900 40px "Nunito"'].map((f) => document.fonts.load(f).catch(() => undefined)));
+  await document.fonts.load('800 40px "Nunito"').catch(() => undefined);
 
   const art = await loadArt();
   const logo = art.url("logo");
@@ -58,7 +58,7 @@ async function boot() {
   }
   const rebuild = (r: number, k: Risk) => {
     board.build(r, k);
-    mascot?.place(board.bounds.halfWidth, board.bounds.bottom, board.bounds.top);
+    mascot?.place(board.bounds.halfWidth, board.bounds.bottom);
   };
 
   let rows = Number($<HTMLInputElement>("rows").value);
@@ -117,7 +117,7 @@ async function boot() {
     chip.type = "button";
     chip.className = "chip";
     chip.textContent = formatMultiplier(bet.multiplier);
-    chip.style.background = `#${multiplierColor(bet.multiplier).getHexString()}`;
+    chip.style.background = `#${bucketColor(bet.bucket, bet.rows).getHexString()}`;
     chip.title = `Nonce ${bet.nonce} — click to verify`;
     chip.addEventListener("click", () => fairness.openVerify(bet));
     historyEl.prepend(chip);

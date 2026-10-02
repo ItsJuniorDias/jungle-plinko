@@ -98,10 +98,10 @@ export class Mascot {
   }
 
   /** Where the mascot sits; called whenever the board is rebuilt. */
-  place(boardHalfWidth: number, groundY: number, topY: number) {
+  place(boardHalfWidth: number, groundY: number) {
     this.root.userData.boardHalfWidth = boardHalfWidth;
-    this.root.userData.groundY = groundY;
-    this.root.userData.topY = topY;
+    // Perch on the frame's lower corner rather than below it (the bottom edge sits off-screen on short viewports).
+    this.root.position.y = groundY + 1.1;
     // In front of the tilted board's bottom edge, which leans towards the camera.
     this.root.position.z = 2.4;
   }
@@ -351,23 +351,17 @@ export class Mascot {
   }
 
   /**
-   * Keep the mascot beside the board on wide screens. On narrow (portrait) screens the frame
-   * crops at the sides and the mascot would cover the outer (jackpot) buckets, so it perches
-   * in the empty top-left corner of the playfield instead.
+   * Keep the mascot beside the board on wide screens and tuck it into the
+   * bottom-left corner on narrow (portrait) screens.
    */
   private fitToView() {
     const { halfW } = this.stage.viewHalfSize(this.root.position.z);
-    const { boardHalfWidth = 6, groundY = -6, topY = 6 } = this.root.userData as Record<string, number>;
+    const boardHalf: number = this.root.userData.boardHalfWidth ?? 6;
+    // Beside the frame when there is room; otherwise as close to the edge as possible,
+    // overlapping the frame's lower-left corner (and a bit smaller on portrait screens).
     const portrait = this.stage.camera.aspect < 1;
-    const scale = portrait ? 0.7 : 1;
-    if (portrait) {
-      this.root.position.x = -(halfW - HEIGHT * 0.85 * scale);
-      this.root.position.y = topY - 2.7 - HEIGHT * scale;
-    } else {
-      // Beside the frame when there is room; otherwise overlapping its lower-left corner.
-      this.root.position.x = -Math.min(boardHalfWidth + HEIGHT * 0.5, halfW - HEIGHT * 0.42);
-      this.root.position.y = groundY + 1.1;
-    }
-    this.root.scale.setScalar(scale);
+    const x = Math.min(boardHalf + HEIGHT * 0.5, halfW - HEIGHT * 0.42);
+    this.root.position.x = -x;
+    this.root.scale.setScalar(portrait ? 0.8 : 1);
   }
 }

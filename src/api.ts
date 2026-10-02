@@ -29,55 +29,33 @@ export interface RevealedSeed {
   betsPlayed: number;
 }
 
-const SESSION_KEY = "jungle-games:session";
-
 export class ApiError extends Error {}
 
-async function post<T>(url: string, body: object): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(data.error ?? `http_${res.status}`);
-  return data as T;
-}
+/**
+ * The session lives in an encrypted HttpOnly cookie that every response renews, so calls go
+ * out one at a time: two overlapping bets would both start from the same nonce and balance.
+ */
+let queue: Promise<unknown> = Promise.resolve();
 
-function storedSessionId(): string | undefined {
-  try {
-    return localStorage.getItem(SESSION_KEY) ?? undefined;
-  } catch {
-    return undefined;
-  }
+function post<T>(url: string, body: object): Promise<T> {
+  const call = queue.then(async () => {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(data.error ?? `http_${res.status}`);
+    return data as T;
+  });
+  queue = call.catch(() => undefined);
+  return call;
 }
 
 export const api = {
-  sessionId: "",
-
-  async session(): Promise<SessionState> {
-    const state = await post<SessionState>("/api/session", { sessionId: storedSessionId() });
-    this.sessionId = state.sessionId;
-    try {
-      localStorage.setItem(SESSION_KEY, state.sessionId);
-    } catch {
-      /* private mode: session lasts for this tab only */
-    }
-    return state;
-  },
-
-  bet(amount: number, rows: number, risk: Risk) {
-    return post<PlinkoBetResult>("/api/plinko/bet", { sessionId: this.sessionId, amount, rows, risk });
-  },
-
-  rotateSeeds(clientSeed?: string) {
-    return post<{ revealed: RevealedSeed; state: SessionState }>("/api/seeds/rotate", {
-      sessionId: this.sessionId,
-      clientSeed,
-    });
-  },
-
-  refill() {
-    return post<SessionState>("/api/wallet/refill", { sessionId: this.sessionId });
-  },
+  session: () => post<SessionState>("/api/session", {}),
+  bet: (amount: number, rows: number, risk: Risk) => post<PlinkoBetResult>("/api/plinko/bet", { amount, rows, risk }),
+  rotateSeeds: (clientSeed?: string) => post<{ revealed: RevealedSeed; state: SessionState }>("/api/seeds/rotate", { clientSeed }),
+  refill: () => post<SessionState>("/api/wallet/refill", {}),
 };

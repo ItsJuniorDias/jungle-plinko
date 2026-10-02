@@ -8,7 +8,7 @@
  * risk-shaped curve is scaled so that Σ p(k)·m(k) = TARGET_RTP, then every
  * multiplier is rounded DOWN (so the real RTP never exceeds the target).
  */
-import { generateFloats } from "./fair";
+import { generateFloats } from "./fair.js";
 
 export const TARGET_RTP = 0.99;
 export const MIN_ROWS = 8;

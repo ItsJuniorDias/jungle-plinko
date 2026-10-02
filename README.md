@@ -44,7 +44,19 @@ npm install
 npm run dev
 ```
 
-Open **http://localhost:5173**. `npm run dev` starts both the game server (`:8787`) and the Vite dev server (`:5173`). Vite proxies `/api` to the game server.
+Open **http://localhost:5173**. `npm run dev` starts both the game server (`:8787`, or `API_PORT`) and the Vite dev server (`:5173`). Vite proxies `/api` to the game server.
+
+### Deploy to Vercel
+
+Import the repo in Vercel (the Vite preset is detected). The game API runs as Vercel Functions from `api/`, with the same code as the local server.
+
+Before the first deploy, add a **`SESSION_SECRET`** environment variable (Project → Settings → Environment Variables) set to a long random string, for example the output of:
+
+```bash
+openssl rand -base64 32
+```
+
+Without it, the API answers `server_misconfigured`. Changing it later signs every player out (they get a fresh demo wallet).
 
 | Shortcut | Action |
 | --- | --- |
@@ -99,7 +111,9 @@ The Plinko board draws all pegs in a single `InstancedMesh`. Ball motion is a ch
 shared/                 runs on the server and in the browser
   fair.ts               provably fair core (Web Crypto HMAC-SHA256 → floats)
   plinko.ts             board math, RTP-solved pay tables, outcome from seeds
-server/index.ts         authoritative game server: session, demo wallet, bets, seed rotation
+server/game.ts          authoritative game logic: sealed sessions, demo wallet, bets, seed rotation
+server/index.ts         local dev server for the API (node:http)
+api/                    the same API as Vercel Functions (one file per endpoint)
 src/
   main.ts               app wiring: controls, balance, history, big-win banner
   api.ts                typed client for the game server
@@ -125,14 +139,14 @@ art/models/             Blender source (.blend) of the 3D props
 
 ### Game server API
 
-All endpoints are `POST` with a JSON body. State is kept in memory, since this is a demo.
+All endpoints are `POST` with a JSON body. There is no database: the session (balance, seeds, nonce) travels in an encrypted `HttpOnly` cookie (AES-256-GCM, keyed by `SESSION_SECRET`) that every response renews. Players cannot read the active server seed or edit their balance. They could replay an old cookie to roll a session back, which is fine for demo credits; a real-money version needs a server-side store. Because each response renews the cookie, the client sends API calls one at a time.
 
 | Endpoint | Body | Returns |
 | --- | --- | --- |
-| `/api/session` | `{ sessionId? }` | `sessionId`, `balance`, `serverSeedHash`, `clientSeed`, `nonce` |
-| `/api/plinko/bet` | `{ sessionId, amount (cents), rows, risk }` | `path`, `bucket`, `multiplier`, `payout`, `balance`, `nonce` |
-| `/api/seeds/rotate` | `{ sessionId, clientSeed? }` | the revealed previous seed + new public state |
-| `/api/wallet/refill` | `{ sessionId }` | public state with the demo balance reset |
+| `/api/session` | `{}` | `sessionId`, `balance`, `serverSeedHash`, `clientSeed`, `nonce` (starts a session if there is none) |
+| `/api/plinko/bet` | `{ amount (cents), rows, risk }` | `path`, `bucket`, `multiplier`, `payout`, `balance`, `nonce` |
+| `/api/seeds/rotate` | `{ clientSeed? }` | the revealed previous seed + new public state |
+| `/api/wallet/refill` | `{}` | public state with the demo balance reset |
 
 ## Art pipeline
 

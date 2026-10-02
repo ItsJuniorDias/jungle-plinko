@@ -10,6 +10,7 @@ import type { Stage } from "../../engine/stage";
 import { addSpringRim, springMaterial, springify } from "../../engine/materials";
 import { labelTexture, softDotTexture } from "../../engine/painted";
 import { ParticleBurst } from "../../engine/particles";
+import { createMossLayers, type MossLayers } from "../../engine/moss";
 import type { Art } from "../../engine/art";
 import { sfx } from "../../engine/sfx";
 import { multiplierTable, type Risk } from "../../../shared/plinko";
@@ -160,6 +161,8 @@ export class PlinkoBoard {
   private boardModel?: THREE.Object3D;
   /** Frame materials (shared by every rebuild's clone) driven by the board glow animations. */
   private frameMats: THREE.MeshStandardMaterial[] = [];
+  /** Volumetric moss grown over the moss painted on the frame. */
+  private moss?: MossLayers;
   private frameGlow = { boost: 0, color: new THREE.Color("#ffc890") };
   /** World-space extent of the board frame, for placing things around it (the mascot). */
   readonly bounds = { halfWidth: 6, bottom: -6 };
@@ -229,6 +232,20 @@ export class PlinkoBoard {
           mat.map = tex;
           mat.alphaTest = 0.5;
           this.keep.add(tex);
+          const uv = (o as THREE.Mesh).geometry.getAttribute("uv1") as THREE.BufferAttribute | undefined;
+          if (uv && !this.moss && tex.channel === 1) {
+            const crop = { u0: Infinity, v0: Infinity, u1: -Infinity, v1: -Infinity };
+            for (let i = 0; i < uv.count; i++) {
+              crop.u0 = Math.min(crop.u0, uv.getX(i));
+              crop.u1 = Math.max(crop.u1, uv.getX(i));
+              crop.v0 = Math.min(crop.v0, uv.getY(i));
+              crop.v1 = Math.max(crop.v1, uv.getY(i));
+            }
+            // No moss over the playfield (the inner 1 / framePad of the slab).
+            const inner = 0.5 / 1.24;
+            this.moss = createMossLayers(tex, { crop, exclude: { halfX: inner, halfY: inner }, layers: matchMedia("(pointer: coarse)").matches ? 8 : 12 });
+            this.keep.add(this.moss.mesh.geometry).add(this.moss.mesh.material);
+          }
         }
         // The painting doubles as an emissive map: the carved vines can "breathe" and flash.
         mat.emissiveMap = mat.map;
@@ -321,6 +338,11 @@ export class PlinkoBoard {
       panel.position.set(0, (top + bottom) / 2, -0.42);
       panel.renderOrder = -2; // the tilt would otherwise sort it over the ball's shadow/halo
       this.board.add(panel);
+      if (this.moss) {
+        this.moss.fit(boardWidth * framePad, boardHeight * framePad, 0.14);
+        this.moss.mesh.position.set(0, (top + bottom) / 2, -0.455);
+        this.board.add(this.moss.mesh);
+      }
     } else {
       slab.position.set(0, (top + bottom) / 2, -0.4);
       slab.renderOrder = -2;

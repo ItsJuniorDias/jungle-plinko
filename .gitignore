@@ -12,3 +12,5 @@ dist
 art/raw/
 art/ref/
 art/previews/
+# Raw AI mascot clips (generated + mattes). The web encodes live in public/mascot/.
+art/mascot-video/

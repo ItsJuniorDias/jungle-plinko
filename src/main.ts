@@ -6,6 +6,7 @@ import { loadArt } from "./engine/art";
 import { sfx } from "./engine/sfx";
 import { PlinkoBoard, bucketColor, formatMultiplier } from "./games/plinko/PlinkoBoard";
 import { Mascot } from "./games/plinko/Mascot";
+import { VideoMascot } from "./games/plinko/VideoMascot";
 import { setupFairness } from "./ui/fairness";
 import { api, ApiError, type PlinkoBetResult } from "./api";
 import { tableRtp, type Risk } from "../shared/plinko";
@@ -47,8 +48,10 @@ async function boot() {
   const stage = new Stage($("viewport"));
   createSpringEnvironment(stage, art);
   const board = new PlinkoBoard(stage, art);
-  const mascotModel = art.model("mascot");
-  const mascot = mascotModel ? new Mascot(stage, mascotModel) : undefined;
+  // The AI video mascot (public/mascot/); the rigged 3D one is the fallback when the clips are missing.
+  const videoMascot = await VideoMascot.load(stage);
+  const mascotModel = videoMascot ? undefined : art.model("mascot");
+  const mascot = videoMascot ?? (mascotModel ? new Mascot(stage, mascotModel) : undefined);
   if (mascot) {
     board.onDrop = () => mascot.onDrop();
     board.onTension = () => mascot.onTension();

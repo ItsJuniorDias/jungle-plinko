@@ -10,7 +10,8 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "simulate": "tsx scripts/simulate.ts",
-    "art": "tsx scripts/generate-art.ts"
+    "art": "tsx scripts/generate-art.ts",
+    "mascot": "tsx scripts/mascot-video.ts"
   },
   "dependencies": {
     "gsap": "^3.15.0",

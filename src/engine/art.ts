@@ -19,7 +19,7 @@ export type ArtName =
   | "cover";
 
 /** AI-generated 3D props (Hyper3D Rodin → Blender cleanup), listed in public/models/manifest.json. */
-export type ModelName = "ball" | "bucket" | "peg" | "board" | "mascot";
+export type ModelName = "ball" | "bucket" | "peg" | "mascot";
 
 export interface ArtEntry {
   file: string;

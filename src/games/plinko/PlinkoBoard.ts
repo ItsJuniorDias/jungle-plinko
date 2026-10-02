@@ -7,7 +7,7 @@ import * as THREE from "three";
 import gsap from "gsap";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import type { Stage } from "../../engine/stage";
-import { addSpringRim, springMaterial, springify } from "../../engine/materials";
+import { springMaterial, springify } from "../../engine/materials";
 import { labelTexture, softDotTexture } from "../../engine/painted";
 import { ParticleBurst } from "../../engine/particles";
 import { createMossLayers, type MossLayers } from "../../engine/moss";
@@ -59,26 +59,43 @@ function flash(mat: THREE.Material, strength: number) {
   apply();
 }
 
+/** Part of board.webp drawn as the board: the whole painted frame, soft edge included (UV, y down). */
+const PAINT_CROP = { u0: 0.05, v0: 0.025, u1: 0.95, v1: 0.985 };
 /**
- * A band of light that slowly travels diagonally across the carved frame. It multiplies
- * the emissive term, which is masked by the painting, so only the vines and carvings glint.
- * Chained after addSpringRim's shader patch.
+ * The painted board is larger than the playfield so the pegs and buckets sit inside the
+ * painting's dark interior (u 0.20–0.80, v 0.17–0.83 of board.webp); nudged down so the
+ * buckets clear the bottom carving and the ball drops in over the top one.
  */
-function addFrameWave(mat: THREE.MeshStandardMaterial, time: { value: number }) {
-  const previous = mat.onBeforeCompile;
-  mat.onBeforeCompile = (shader, renderer) => {
-    previous.call(mat, shader, renderer);
-    shader.uniforms.uFrameTime = time;
+const PAINT_PAD = 1.4;
+const PAINT_SHIFT = -0.35;
+
+interface FrameGlow {
+  uFrameTime: { value: number };
+  /** Idle "breathing" of the vines and carvings. */
+  uBreathe: { value: number };
+  /** Landing flash, in the bucket's colour. */
+  uGlowBoost: { value: number };
+  uGlowColor: { value: THREE.Color };
+}
+
+/**
+ * Light on the painted frame: the painting brightens by its own colour (so the lit vines and
+ * carvings glint while the dark stone stays dark) under a slow breathing, a band of light
+ * travelling diagonally across it, and the landing flash.
+ */
+function addPaintedGlow(mat: THREE.MeshBasicMaterial, u: FrameGlow) {
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, u);
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\nuniform float uFrameTime;")
+      .replace("#include <common>", "#include <common>\nuniform float uFrameTime;\nuniform float uBreathe;\nuniform float uGlowBoost;\nuniform vec3 uGlowColor;")
       .replace(
-        "#include <emissivemap_fragment>",
-        `#include <emissivemap_fragment>
+        "#include <map_fragment>",
+        `#include <map_fragment>
         float band = pow(0.5 + 0.5 * sin(vMapUv.x * 7.0 + vMapUv.y * 5.0 - uFrameTime * 1.6), 10.0);
-        totalEmissiveRadiance *= 0.6 + 2.2 * band;`,
+        diffuseColor.rgb += diffuseColor.rgb * uGlowColor * (uBreathe * (0.6 + 2.2 * band) + uGlowBoost);`,
       );
   };
-  mat.customProgramCacheKey = () => "spring-rim-frame-wave";
+  mat.customProgramCacheKey = () => "painted-frame-glow";
 }
 
 /** Frame flash strength for ordinary wins: grows with the multiplier, capped. */
@@ -158,9 +175,8 @@ export class PlinkoBoard {
   private ballModel?: THREE.Object3D;
   private pegModel?: { geo: THREE.BufferGeometry; mat: THREE.Material };
   private bucketModel?: THREE.Object3D;
-  private boardModel?: THREE.Object3D;
-  /** Frame materials (shared by every rebuild's clone) driven by the board glow animations. */
-  private frameMats: THREE.MeshStandardMaterial[] = [];
+  /** The painted board (board.webp), shared by every rebuild. */
+  private paint?: { geo: THREE.PlaneGeometry; mat: THREE.MeshBasicMaterial };
   /** Volumetric moss grown over the moss painted on the frame. */
   private moss?: MossLayers;
   private frameGlow = { boost: 0, color: new THREE.Color("#ffc890") };
@@ -177,8 +193,13 @@ export class PlinkoBoard {
   private pegContactR = PEG_R;
   private ballContactR = BALL_R;
   private bucketTop = 0.25;
-  /** Time uniform for the travelling light wave along the carved frame. */
-  private frameWave = { value: 0 };
+  /** Light on the painted frame: travelling wave, breathing and landing flash. */
+  private frameU: FrameGlow = {
+    uFrameTime: { value: 0 },
+    uBreathe: { value: 0 },
+    uGlowBoost: { value: 0 },
+    uGlowColor: { value: new THREE.Color("#ffc890") },
+  };
   /** Geometries/materials shared across rebuilds: never disposed by clearBoard(). */
   private keep = new Set<unknown>();
   private rows = 0;
@@ -210,53 +231,25 @@ export class PlinkoBoard {
       this.pegModel = { geo, mat };
       this.pegContactR = PEG_R * 1.25;
     }
-    const boardModel = art?.model("board");
-    if (boardModel) {
-      // Carved stone frame: PBR (not toon) so the raking key light and the normal map bring
-      // out the carving's relief, plus Spring's warm rim glow and a golden-hour colour tint.
-      boardModel.traverse((o) => {
-        const mat = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
-        if (!mat?.isMeshStandardMaterial) return;
-        mat.roughness = 0.9;
-        mat.metalness = 0;
-        mat.color.setRGB(1.0, 0.94, 0.84); // warm golden-hour cast over the painting
-        if (mat.normalMap) mat.normalScale.multiplyScalar(1.6); // keep glTF's flipped Y
-        // Organic silhouette: swap in the painting WITH its alpha and cut along the carved,
-        // rounded frame instead of showing the model's rectangular slab edges.
-        const paint = art?.texture("board");
-        if (paint && mat.map) {
-          const tex = paint.clone();
-          tex.flipY = mat.map.flipY;
-          tex.channel = mat.map.channel;
-          tex.needsUpdate = true;
-          mat.map = tex;
-          mat.alphaTest = 0.5;
-          this.keep.add(tex);
-          const uv = (o as THREE.Mesh).geometry.getAttribute("uv1") as THREE.BufferAttribute | undefined;
-          if (uv && !this.moss && tex.channel === 1) {
-            const crop = { u0: Infinity, v0: Infinity, u1: -Infinity, v1: -Infinity };
-            for (let i = 0; i < uv.count; i++) {
-              crop.u0 = Math.min(crop.u0, uv.getX(i));
-              crop.u1 = Math.max(crop.u1, uv.getX(i));
-              crop.v0 = Math.min(crop.v0, uv.getY(i));
-              crop.v1 = Math.max(crop.v1, uv.getY(i));
-            }
-            // No moss over the playfield (the inner 1 / framePad of the slab).
-            const inner = 0.5 / 1.24;
-            this.moss = createMossLayers(tex, { crop, exclude: { halfX: inner, halfY: inner }, layers: matchMedia("(pointer: coarse)").matches ? 8 : 12 });
-            this.keep.add(this.moss.mesh.geometry).add(this.moss.mesh.material);
-          }
-        }
-        // The painting doubles as an emissive map: the carved vines can "breathe" and flash.
-        mat.emissiveMap = mat.map;
-        mat.emissive.set("#ffc890");
-        mat.emissiveIntensity = 0.06;
-        addSpringRim(mat, "#ffcf8a", 0.55, 2.4);
-        addFrameWave(mat, this.frameWave);
-        this.frameMats.push(mat);
+    const boardTex = art?.texture("board");
+    if (boardTex) {
+      // The painted board: drawn flat and unlit, exactly as painted, cropped to the frame.
+      const geo = new THREE.PlaneGeometry(1, 1);
+      const uv = geo.getAttribute("uv") as THREE.BufferAttribute;
+      const { u0, v0, u1, v1 } = PAINT_CROP;
+      for (let i = 0; i < uv.count; i++) uv.setXY(i, u0 + uv.getX(i) * (u1 - u0), 1 - v1 + uv.getY(i) * (v1 - v0));
+      const mat = new THREE.MeshBasicMaterial({ map: boardTex, transparent: true, depthWrite: false });
+      addPaintedGlow(mat, this.frameU);
+      this.paint = { geo, mat };
+      this.keep.add(geo).add(mat);
+      // No moss over the playfield (the inner 1 / PAINT_PAD of the board).
+      const inner = 0.5 / PAINT_PAD;
+      this.moss = createMossLayers(boardTex, {
+        crop: PAINT_CROP,
+        exclude: { halfX: inner, halfY: inner },
+        layers: matchMedia("(pointer: coarse)").matches ? 8 : 12,
       });
-      this.protect(boardModel);
-      this.boardModel = boardModel;
+      this.keep.add(this.moss.mesh.geometry).add(this.moss.mesh.material);
     }
     const bucketModel = art?.model("bucket");
     if (bucketModel) {
@@ -310,44 +303,24 @@ export class PlinkoBoard {
     const boardWidth = (rows + 1) * S + 1.4;
 
     // Backing slab so the pegs read against the busy painted background:
-    // the painted stone board when available, otherwise a soft dark panel.
-    const boardTex = this.art?.texture("board");
-    // The painted/3D board has a thick carved frame: grow it so pegs sit on the smooth inner area.
-    const framePad = this.boardModel || boardTex ? 1.24 : 1;
-    const slab: THREE.Object3D = this.boardModel
-      ? this.boardModel.clone(true)
-      : boardTex
-      ? new THREE.Mesh(
-          new THREE.PlaneGeometry(boardWidth * framePad, boardHeight * framePad),
-          new THREE.MeshBasicMaterial({ map: boardTex, transparent: true, opacity: 0.94, depthWrite: false }),
-        )
+    // the painted board when available, otherwise a soft dark panel.
+    const framePad = this.paint ? PAINT_PAD : 1;
+    const centreY = (top + bottom) / 2 + (this.paint ? PAINT_SHIFT : 0);
+    const slab = this.paint
+      ? new THREE.Mesh(this.paint.geo, this.paint.mat)
       : new THREE.Mesh(
           new RoundedBoxGeometry(boardWidth, boardHeight, 0.1, 4, 0.5),
           new THREE.MeshBasicMaterial({ color: "#1a1028", transparent: true, opacity: this.art?.texture("background") ? 0.72 : 0.38, depthWrite: false }),
         );
-    if (this.boardModel) {
-      // Normalised model (≈1×1, depth ≈0.15): stretch to the board, carved face just behind the pegs.
-      const depth = 3.2;
-      slab.scale.set(boardWidth * framePad, boardHeight * framePad, depth);
-      slab.position.set(0, (top + bottom) / 2, -0.45 - 0.074 * depth);
-      // Dark glassy inner panel over the carved stone so pegs and buckets read clearly.
-      const panel = new THREE.Mesh(
-        new RoundedBoxGeometry(boardWidth, boardHeight, 0.02, 4, 0.45),
-        new THREE.MeshBasicMaterial({ color: "#140c22", transparent: true, opacity: 0.35, depthWrite: false }),
-      );
-      panel.position.set(0, (top + bottom) / 2, -0.42);
-      panel.renderOrder = -2; // the tilt would otherwise sort it over the ball's shadow/halo
-      this.board.add(panel);
-      if (this.moss) {
-        this.moss.fit(boardWidth * framePad, boardHeight * framePad, 0.14);
-        this.moss.mesh.position.set(0, (top + bottom) / 2, -0.455);
-        this.board.add(this.moss.mesh);
-      }
-    } else {
-      slab.position.set(0, (top + bottom) / 2, -0.4);
-      slab.renderOrder = -2;
-    }
+    if (this.paint) slab.scale.set(boardWidth * framePad, boardHeight * framePad, 1);
+    slab.position.set(0, centreY, -0.4);
+    slab.renderOrder = -2;
     this.board.add(slab);
+    if (this.moss) {
+      this.moss.fit(boardWidth * framePad, boardHeight * framePad, 0.14);
+      this.moss.mesh.position.set(0, centreY, -0.395);
+      this.board.add(this.moss.mesh);
+    }
 
     // Pegs: one instanced draw call. Row r has r + 3 pegs.
     const pegCount = Array.from({ length: rows }, (_, r) => r + 3).reduce((a, b) => a + b, 0);
@@ -426,10 +399,10 @@ export class PlinkoBoard {
     this.board.position.y = (-(top + bottom) / 2) * scale;
     this.board.rotation.x = BOARD_TILT;
     this.bounds.halfWidth = (boardWidth * framePad * scale) / 2;
-    this.bounds.bottom = this.board.position.y + (bottom - (boardHeight * (framePad - 1)) / 2) * scale;
+    this.bounds.bottom = this.board.position.y + (centreY - (boardHeight * framePad) / 2) * scale;
     // The tilt brings the bottom edge towards the camera (and the 3D frame has depth),
     // so leave extra vertical room and aim slightly low.
-    const tiltRoom = this.boardModel ? 1.1 : 1.04;
+    const tiltRoom = 1.04;
     this.stage.frame(
       Math.max(boardWidth * framePad * scale, 9),
       BOARD_WORLD_HEIGHT * framePad * tiltRoom + 0.4,
@@ -596,14 +569,10 @@ export class PlinkoBoard {
     this.updatePegMatrices(false);
 
     // Frame glow: slow idle "breathing", a travelling light wave, plus any landing flash.
-    this.frameWave.value = this.time;
-    if (this.frameMats.length) {
-      const breathe = 0.06 + 0.035 * (0.5 + 0.5 * Math.sin(this.time * 1.3));
-      for (const m of this.frameMats) {
-        m.emissiveIntensity = breathe + this.frameGlow.boost;
-        m.emissive.copy(this.frameGlow.color);
-      }
-    }
+    this.frameU.uFrameTime.value = this.time;
+    this.frameU.uBreathe.value = 0.06 + 0.035 * (0.5 + 0.5 * Math.sin(this.time * 1.3));
+    this.frameU.uGlowBoost.value = this.frameGlow.boost;
+    this.frameU.uGlowColor.value.copy(this.frameGlow.color);
 
     // Peg flash decay.
     if (this.pegs) {
@@ -741,7 +710,7 @@ export class PlinkoBoard {
 
   /** Flash the carved frame in the bucket's colour; `pulses` > 1 throbs for big wins. */
   private glowFrame(color: THREE.Color, strength: number, pulses: number) {
-    if (!this.frameMats.length) return;
+    if (!this.paint) return;
     gsap.killTweensOf(this.frameGlow);
     this.frameGlow.color.copy(color).lerp(new THREE.Color("#fff1d0"), 0.35);
     const tl = gsap.timeline({ onComplete: () => this.frameGlow.color.set("#ffc890") });

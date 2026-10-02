@@ -120,8 +120,8 @@ function strandTexture(): THREE.DataTexture {
 }
 
 /**
- * Builds the moss shells for a flat surface whose painting is `map` (sampled on `crop` through
- * the second UV set, like the 3D board). Centre the mesh on the surface's front face.
+ * Builds the moss shells for a flat surface whose painting is `map`, shown cropped to `crop`.
+ * Centre the mesh on the surface's front face.
  */
 export function createMossLayers(map: THREE.Texture, opts: MossOptions): MossLayers {
   const image = map.image as HTMLImageElement;
@@ -146,14 +146,16 @@ export function createMossLayers(map: THREE.Texture, opts: MossOptions): MossLay
         const mx = (cx + qx) / CELLS;
         const my = (cy + qy) / CELLS;
         positions.push(mx - 0.5, 0.5 - my, 0);
-        uvs.push(u0 + mx * (u1 - u0), v0 + my * (v1 - v0));
+        const v = v0 + my * (v1 - v0);
+        uvs.push(u0 + mx * (u1 - u0), map.flipY ? 1 - v : v);
       }
       indices.push(base, base + 2, base + 1, base, base + 3, base + 2);
     }
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geo.setAttribute("uv1", new THREE.Float32BufferAttribute(uvs, 2));
+  // Same UV set as the map samples (the 3D board used its second set; a flat painting the first).
+  geo.setAttribute(map.channel ? `uv${map.channel}` : "uv", new THREE.Float32BufferAttribute(uvs, 2));
   geo.setAttribute("normal", new THREE.Float32BufferAttribute(positions.map((_, i) => (i % 3 === 2 ? 1 : 0)), 3));
   geo.setIndex(indices);
 
@@ -161,6 +163,7 @@ export function createMossLayers(map: THREE.Texture, opts: MossOptions): MossLay
     uMossMask: { value: maskTex },
     uStrands: { value: strands },
     uCrop: { value: new THREE.Vector4(u0, v0, u1 - u0, v1 - v0) },
+    uFlipY: { value: map.flipY ? 1 : 0 },
     uStrandScale: { value: new THREE.Vector2(1, 1) },
     uLayers: { value: opts.layers },
   };
@@ -182,12 +185,13 @@ export function createMossLayers(map: THREE.Texture, opts: MossOptions): MossLay
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
-        "#include <common>\nuniform sampler2D uMossMask;\nuniform sampler2D uStrands;\nuniform vec4 uCrop;\nvarying float vLayer;\nvarying vec2 vStrandUv;\nvarying float vTop;",
+        "#include <common>\nuniform sampler2D uMossMask;\nuniform sampler2D uStrands;\nuniform vec4 uCrop;\nuniform float uFlipY;\nvarying float vLayer;\nvarying vec2 vStrandUv;\nvarying float vTop;",
       )
       .replace(
         "#include <map_fragment>",
         `#include <map_fragment>
-        vec2 cushion = texture2D(uMossMask, (vMapUv - uCrop.xy) / uCrop.zw).rg;
+        vec2 paintUv = vec2(vMapUv.x, mix(vMapUv.y, 1.0 - vMapUv.y, uFlipY)); // y down, like the mask
+        vec2 cushion = texture2D(uMossMask, (paintUv - uCrop.xy) / uCrop.zw).rg;
         float strand = texture2D(uStrands, vStrandUv).r;
         // The root layer is a dense mat; higher layers keep only strands that reach them.
         if (vLayer < 0.001 ? cushion.g < 0.45 : strand * cushion.r < vLayer) discard;

@@ -11,10 +11,6 @@
     "file": "peg.glb",
     "tris": 400
   },
-  "board": {
-    "file": "board.glb",
-    "tris": 7000
-  },
   "mascot": {
     "file": "mascot.glb",
     "tris": 9000

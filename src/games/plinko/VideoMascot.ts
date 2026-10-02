@@ -1,8 +1,9 @@
 /**
  * The mascot as AI-generated video clips with alpha (public/mascot/, made by
- * `npm run mascot`): an idle loop plus one clip per reaction. Each reaction fades in over the
- * idle and fades back into it just before it ends, so the clips never need to match
- * frame-perfectly. Same hooks as the 3D Mascot, which stays as the fallback.
+ * `npm run mascot`): an idle loop plus one clip per reaction. Clips dissolve into each other
+ * (both playing during the blend), and a reaction dissolves back into the idle just before it
+ * ends, so the clips never need to match frame-perfectly. Same hooks as the 3D Mascot, which
+ * stays as the fallback.
  */
 import * as THREE from "three";
 import gsap from "gsap";
@@ -12,10 +13,10 @@ type Clip = "idle" | "drop" | "tension" | "happy" | "bigWin" | "sad";
 const CLIPS: Clip[] = ["idle", "drop", "tension", "happy", "bigWin", "sad"];
 /** A reaction never interrupts a more important one. */
 const PRIORITY: Record<Clip, number> = { idle: 0, drop: 1, tension: 2, sad: 3, happy: 3, bigWin: 4 };
-const HEIGHT = 2.6; // character height in world units, like the 3D mascot
+const HEIGHT = 3.2; // character height in world units (the 3D mascot is 2.6)
 const FRAME = HEIGHT / 0.72; // the character fills ~72% of the square clip
 const FEET = 0.36; // its feet sit this far (in frames) below the clip's centre
-const FADE = 0.2;
+const FADE = 0.4;
 
 /** Safari plays HEVC with alpha (.mov); the other browsers VP9 with alpha (.webm). */
 const EXT = /^((?!chrome|android|crios|fxios).)*safari/i.test(navigator.userAgent) ? "mov" : "webm";
@@ -30,18 +31,40 @@ function loadVideo(clip: Clip): HTMLVideoElement {
   return video;
 }
 
-interface Layer {
-  mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
-  clip?: Clip;
+/**
+ * Dissolve between two clips in one draw: colour is blended premultiplied by alpha, so where
+ * both frames show the mascot it stays opaque (two faded planes would turn see-through).
+ */
+function addDissolve(mat: THREE.MeshBasicMaterial, u: { uTo: { value: THREE.Texture | null }; uMix: { value: number } }) {
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, u);
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nuniform sampler2D uTo;\nuniform float uMix;")
+      .replace(
+        "#include <map_fragment>",
+        `vec4 fromC = texture2D(map, vMapUv);
+        vec4 toC = texture2D(uTo, vMapUv);
+        #ifdef DECODE_VIDEO_TEXTURE
+        // Video frames are sRGB-decoded in the shader (three's map_fragment does the same).
+        fromC = sRGBTransferEOTF(fromC);
+        toC = sRGBTransferEOTF(toC);
+        #endif
+        float mixA = mix(fromC.a, toC.a, uMix);
+        diffuseColor *= vec4(mix(fromC.rgb * fromC.a, toC.rgb * toC.a, uMix) / max(mixA, 1e-4), mixA);`,
+      );
+  };
+  mat.customProgramCacheKey = () => "mascot-dissolve";
 }
 
 export class VideoMascot {
   readonly root = new THREE.Group();
   private videos = new Map<Clip, HTMLVideoElement>();
   private textures = new Map<Clip, THREE.VideoTexture>();
-  /** Two stacked planes: the incoming clip fades in on top of the outgoing one. */
-  private layers: Layer[];
-  private top = 0;
+  private mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  private blend = { uTo: { value: null as THREE.Texture | null }, uMix: { value: 0 } };
+  /** Clip on screen (`from`) and the one dissolving in (`to`, equal when no blend runs). */
+  private from: Clip = "idle";
+  private to: Clip = "idle";
   private current: Clip = "idle";
 
   /** Resolves once the idle can play, or undefined when the clips are missing. */
@@ -66,15 +89,14 @@ export class VideoMascot {
       tex.colorSpace = THREE.SRGBColorSpace;
       this.textures.set(clip, tex);
     }
-    const geo = new THREE.PlaneGeometry(FRAME, FRAME).translate(0, FEET * FRAME, 0);
-    this.layers = [0, 1].map(() => {
-      const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, fog: false }));
-      mesh.visible = false;
-      this.root.add(mesh);
-      return { mesh };
-    });
+    const material = new THREE.MeshBasicMaterial({ map: this.textures.get("idle")!, transparent: true, depthWrite: false, fog: false });
+    addDissolve(material, this.blend);
+    this.blend.uTo.value = material.map;
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(FRAME, FRAME).translate(0, FEET * FRAME, 0), material);
+    this.mesh.renderOrder = 20;
+    this.root.add(this.mesh);
     stage.scene.add(this.root);
-    this.show("idle");
+    void this.videos.get("idle")!.play().catch(() => undefined);
     stage.onUpdate(() => this.update());
   }
 
@@ -116,26 +138,24 @@ export class VideoMascot {
     void video.play().catch(() => undefined);
     this.current = clip;
 
-    const incoming = this.layers[1 - this.top];
-    const outgoing = this.layers[this.top];
-    this.top = 1 - this.top;
-    incoming.clip = clip;
-    incoming.mesh.material.map = this.textures.get(clip)!;
-    incoming.mesh.material.needsUpdate = true;
-    incoming.mesh.visible = true;
-    incoming.mesh.renderOrder = 21;
-    outgoing.mesh.renderOrder = 20;
-    // The outgoing clip stays opaque underneath, so the mascot never turns see-through mid-fade.
-    gsap.killTweensOf(incoming.mesh.material);
-    gsap.fromTo(incoming.mesh.material, { opacity: outgoing.mesh.visible ? 0 : 1 }, {
-      opacity: 1,
-      duration: FADE,
-      ease: "power1.out",
-      onComplete: () => {
-        outgoing.mesh.visible = false;
-        if (outgoing.clip && outgoing.clip !== clip) this.videos.get(outgoing.clip)!.pause();
-      },
-    });
+    // A blend still running ends where it is headed; the new one starts from there.
+    gsap.killTweensOf(this.blend.uMix);
+    this.settle();
+    if (clip === this.from) return;
+    this.to = clip;
+    this.blend.uTo.value = this.textures.get(clip)!;
+    this.blend.uMix.value = 0;
+    gsap.to(this.blend.uMix, { value: 1, duration: FADE, ease: "sine.inOut", onComplete: () => this.settle() });
+  }
+
+  /** Makes the incoming clip the one on screen and stops the outgoing one. */
+  private settle() {
+    if (this.from === this.to) return;
+    const mat = this.mesh.material;
+    if (this.from !== this.current) this.videos.get(this.from)!.pause();
+    this.from = this.to;
+    mat.map = this.textures.get(this.from)!;
+    this.blend.uMix.value = 0;
   }
 
   private update() {

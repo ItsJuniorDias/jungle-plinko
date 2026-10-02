@@ -18,17 +18,42 @@ const FRAME = HEIGHT / 0.72; // the character fills ~72% of the square clip
 const FEET = 0.36; // its feet sit this far (in frames) below the clip's centre
 const FADE = 0.4;
 
-/** Safari plays HEVC with alpha (.mov); the other browsers VP9 with alpha (.webm). */
-const EXT = /^((?!chrome|android|crios|fxios).)*safari/i.test(navigator.userAgent) ? "mov" : "webm";
+/**
+ * Apple's WebKit plays HEVC with alpha (.mov) but not VP9 with alpha. That is Safari on the Mac
+ * and every browser on iPhone and iPad (Chrome and Firefox there are WebKit too); the other
+ * browsers get VP9 with alpha (.webm).
+ */
+const ua = navigator.userAgent;
+const appleWebKit =
+  /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) || /^((?!chrome|android|edg).)*safari/i.test(ua);
+const EXT = appleWebKit ? "mov" : "webm";
 
 function loadVideo(clip: Clip): HTMLVideoElement {
   const video = document.createElement("video");
-  video.src = `/mascot/${clip}.${EXT}`;
+  // Attributes as well as properties: iOS checks them for muted inline autoplay.
   video.muted = true;
+  video.setAttribute("muted", "");
   video.playsInline = true;
+  video.setAttribute("playsinline", "");
   video.preload = "auto";
   video.loop = clip === "idle";
+  video.src = `/mascot/${clip}.${EXT}`;
   return video;
+}
+
+/**
+ * iOS ignores `preload`: only playing loads a clip. Load its first frames, then park it at 0
+ * (unless a reaction started using it meanwhile).
+ */
+function warmUp(video: HTMLVideoElement, inUse: () => boolean) {
+  video
+    .play()
+    .then(() => {
+      if (inUse()) return;
+      video.pause();
+      video.currentTime = 0;
+    })
+    .catch(() => undefined);
 }
 
 /**
@@ -67,21 +92,33 @@ export class VideoMascot {
   private to: Clip = "idle";
   private current: Clip = "idle";
 
-  /** Resolves once the idle can play, or undefined when the clips are missing. */
+  /**
+   * Resolves once the idle can play, or undefined when the clips are missing. When the browser
+   * blocks even muted autoplay (iOS Low Power Mode), it still resolves and the clips start on
+   * the player's first tap.
+   */
   static async load(stage: Stage): Promise<VideoMascot | undefined> {
     const videos = new Map(CLIPS.map((clip) => [clip, loadVideo(clip)] as const));
     const idle = videos.get("idle")!;
+    let blocked = false;
     const ok = await new Promise<boolean>((resolve) => {
-      idle.addEventListener("loadeddata", () => resolve(true), { once: true });
+      for (const event of ["loadeddata", "playing"]) idle.addEventListener(event, () => resolve(true), { once: true });
       idle.addEventListener("error", () => resolve(false), { once: true });
+      idle.play().catch((err: DOMException) => {
+        if (err.name !== "NotAllowedError") return;
+        blocked = true;
+        resolve(true);
+      });
       setTimeout(() => resolve(false), 10_000);
     });
-    return ok ? new VideoMascot(stage, videos) : undefined;
+    if (!ok) return undefined;
+    return new VideoMascot(stage, videos, blocked);
   }
 
   private constructor(
     private stage: Stage,
     videos: Map<Clip, HTMLVideoElement>,
+    autoplayBlocked: boolean,
   ) {
     this.videos = videos;
     for (const [clip, video] of videos) {
@@ -96,7 +133,25 @@ export class VideoMascot {
     this.mesh.renderOrder = 20;
     this.root.add(this.mesh);
     stage.scene.add(this.root);
-    void this.videos.get("idle")!.play().catch(() => undefined);
+    const start = () => {
+      void this.videos.get(this.current)!.play().catch(() => undefined);
+      for (const [clip, video] of this.videos) {
+        if (clip !== this.current && video.readyState < 2) warmUp(video, () => clip === this.from || clip === this.to);
+      }
+    };
+    if (autoplayBlocked) {
+      this.mesh.visible = false;
+      const unlock = () => {
+        window.removeEventListener("pointerdown", unlock);
+        window.removeEventListener("keydown", unlock);
+        this.mesh.visible = true;
+        start();
+      };
+      window.addEventListener("pointerdown", unlock);
+      window.addEventListener("keydown", unlock);
+    } else {
+      start();
+    }
     stage.onUpdate(() => this.update());
   }
 
@@ -134,10 +189,27 @@ export class VideoMascot {
 
   private show(clip: Clip) {
     const video = this.videos.get(clip)!;
+    // Checked before rewinding: the seek itself briefly drops a loaded clip's readyState.
+    const loaded = video.readyState >= 2;
     if (clip !== "idle" || this.current !== "idle") video.currentTime = 0;
     void video.play().catch(() => undefined);
     this.current = clip;
 
+    // A clip that has not loaded yet (iOS) joins the blend once it can play.
+    if (!loaded) {
+      const join = () => {
+        video.removeEventListener("canplay", join);
+        video.removeEventListener("playing", join);
+        if (this.current === clip) this.blendTo(clip);
+      };
+      video.addEventListener("canplay", join);
+      video.addEventListener("playing", join);
+      return;
+    }
+    this.blendTo(clip);
+  }
+
+  private blendTo(clip: Clip) {
     // A blend still running ends where it is headed; the new one starts from there.
     gsap.killTweensOf(this.blend.uMix);
     this.settle();

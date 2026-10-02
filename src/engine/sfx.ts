@@ -27,6 +27,14 @@ const voices = new Map<Sound, number>();
 let loopsStarted = false;
 let muted = readMuted();
 
+/**
+ * iOS gives a page that only plays Web Audio the "ambient" session, which Silent mode mutes.
+ * "playback" makes the game sound even then, like a video does; the cost is that it pauses
+ * other apps' music while it plays. Inside a cross-origin iframe this needs allow="microphone".
+ */
+const audioSession = (navigator as Navigator & { audioSession?: { type: string } }).audioSession;
+if (audioSession) audioSession.type = "playback";
+
 // Download everything right away; decoding waits for the AudioContext (first gesture).
 const files = new Map(
   [...SOUNDS, ...LOOPS].map((name) => [name, fetch(`/audio/${name}.mp3`).then((r) => (r.ok ? r.arrayBuffer() : undefined)).catch(() => undefined)] as const),
@@ -71,17 +79,21 @@ function unlock() {
     void ctx.suspend();
     return;
   }
-  if (ctx.state === "suspended") void ctx.resume();
+  // Also "interrupted": iOS's state after a call or a trip to the background.
+  if (ctx.state !== "running") void ctx.resume().catch(() => undefined);
   if (!loopsStarted) {
     loopsStarted = true;
     for (const loop of LOOPS) startLoop(loop);
   }
 }
-for (const event of ["pointerdown", "keydown"]) window.addEventListener(event, unlock, { passive: true });
+// A touch only counts as a user gesture when the finger lifts (pointerup / touchend): on a
+// phone, a context resumed on pointerdown stays suspended. pointerdown still covers the mouse,
+// click covers VoiceOver and Switch Control (no touch events).
+for (const event of ["pointerdown", "pointerup", "touchend", "click", "keydown"]) window.addEventListener(event, unlock, { passive: true });
 // Silence the loops while the tab is hidden (and on phones, when the app is backgrounded).
 document.addEventListener("visibilitychange", () => {
   if (!ctx || muted) return;
-  void (document.hidden ? ctx.suspend() : ctx.resume());
+  void (document.hidden ? ctx.suspend() : ctx.resume()).catch(() => undefined);
 });
 
 const startedLoops = new Set<Loop>();
@@ -118,6 +130,8 @@ function audibleRange(buffer: AudioBuffer): [number, number] {
  */
 function play(sound: Sound, { gain = 1, rate = 1, pan = 0, delay = 0 } = {}): boolean {
   if (muted || !ctx || !buses) return true;
+  // Suspended or interrupted: skip, or every sound would play at once on resume.
+  if (ctx.state !== "running") return true;
   const buffer = buffers.get(sound);
   if (!buffer) return !missing.has(sound);
   const active = voices.get(sound) ?? 0;
@@ -138,7 +152,7 @@ function play(sound: Sound, { gain = 1, rate = 1, pan = 0, delay = 0 } = {}): bo
 
 /** Fallback synthesized tone, used when a sound file is missing. */
 function tone(freq: number, duration: number, type: OscillatorType, gain: number, delay = 0, pan = 0, slideTo?: number) {
-  if (muted || !ctx || !buses) return;
+  if (muted || !ctx || !buses || ctx.state !== "running") return;
   const t = ctx.currentTime + delay;
   const osc = ctx.createOscillator();
   const g = ctx.createGain();
@@ -219,6 +233,6 @@ export const sfx = {
   },
   /** What is loaded and playing (for debugging from the console). */
   status() {
-    return { context: ctx?.state ?? "locked", decoded: [...buffers.keys()], missing: [...missing], loops: [...startedLoops] };
+    return { context: ctx?.state ?? "locked", muted, session: audioSession?.type, decoded: [...buffers.keys()], missing: [...missing], loops: [...startedLoops] };
   },
 };

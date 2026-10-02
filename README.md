@@ -158,7 +158,8 @@ The pegs are a single `InstancedMesh`. The ball follows a choreographed path of 
 - **Losses.** They get a soft, neutral wood "tok", never a sound that celebrates or mocks the loss.
 - **Voice limits.** Each sound has a cap, so autobet showers stay clean.
 - **Loops.** They skip MP3 padding for a gapless seam.
-- **Playback.** Audio starts on the first gesture (browser autoplay rules) and pauses while the tab is hidden.
+- **Playback.** Audio starts on the first gesture (browser autoplay rules) and pauses while the tab is hidden. On a phone that gesture is the finger lifting off the screen; a touch's `pointerdown` doesn't count.
+- **iPhone Silent mode.** The game asks iOS for the `playback` audio session, so it still sounds in Silent mode, like a video. That pauses other apps' music while it plays, and inside a cross-origin iframe it needs `allow="microphone"`.
 - **Fallback.** A missing file falls back to a synthesized tone.
 
 ## Asset pipelines

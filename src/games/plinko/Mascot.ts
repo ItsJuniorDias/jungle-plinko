@@ -15,6 +15,7 @@ import gsap from "gsap";
 import type { Stage } from "../../engine/stage";
 import { springMaterial, springify } from "../../engine/materials";
 import { ParticleBurst } from "../../engine/particles";
+import type { BoardBounds } from "./PlinkoBoard";
 
 const HEIGHT = 2.6; // world units (the board is 12 tall)
 const BASE_YAW = 0.5; // sits left of the board, turned three-quarters towards it
@@ -98,10 +99,10 @@ export class Mascot {
   }
 
   /** Where the mascot sits; called whenever the board is rebuilt. */
-  place(boardHalfWidth: number, groundY: number) {
-    this.root.userData.boardHalfWidth = boardHalfWidth;
+  place({ halfWidth, bottom }: BoardBounds) {
+    this.root.userData.boardHalfWidth = halfWidth;
     // Perch on the frame's lower corner rather than below it (the bottom edge sits off-screen on short viewports).
-    this.root.position.y = groundY + 1.1;
+    this.root.position.y = bottom + 1.1;
     // In front of the tilted board's bottom edge, which leans towards the camera.
     this.root.position.z = 2.4;
   }

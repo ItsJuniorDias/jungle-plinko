@@ -39,6 +39,13 @@ const POPUP_MIN = 2;
 
 const easeOutBack = (t: number) => 1 + 2.4 * (t - 1) ** 3 + 1.4 * (t - 1) ** 2;
 
+export interface BoardBounds {
+  halfWidth: number;
+  bottom: number;
+  /** Outer edge of the leftmost bucket (the mascot keeps clear of it). */
+  bucketEdge: THREE.Vector3;
+}
+
 export function bucketColor(k: number, rows: number): THREE.Color {
   const d = Math.abs(k - rows / 2) / (rows / 2);
   return d < 0.5
@@ -181,7 +188,7 @@ export class PlinkoBoard {
   private moss?: MossLayers;
   private frameGlow = { boost: 0, color: new THREE.Color("#ffc890") };
   /** World-space extent of the board frame, for placing things around it (the mascot). */
-  readonly bounds = { halfWidth: 6, bottom: -6 };
+  readonly bounds: BoardBounds = { halfWidth: 6, bottom: -6, bucketEdge: new THREE.Vector3(-6, -6, 0) };
   /** Game-feel hooks (the mascot listens to these). */
   onDrop?: () => void;
   onLand?: (multiplier: number) => void;
@@ -400,6 +407,9 @@ export class PlinkoBoard {
     this.board.rotation.x = BOARD_TILT;
     this.bounds.halfWidth = (boardWidth * framePad * scale) / 2;
     this.bounds.bottom = this.board.position.y + (centreY - (boardHeight * framePad) / 2) * scale;
+    // From the board's own transform: the root may be mid-wobble.
+    this.board.updateMatrix();
+    this.bounds.bucketEdge.set(this.bucketX(0) - S / 2, this.bucketY(), 0).applyMatrix4(this.board.matrix);
     // The tilt brings the bottom edge towards the camera (and the 3D frame has depth),
     // so leave extra vertical room and aim slightly low.
     const tiltRoom = 1.04;

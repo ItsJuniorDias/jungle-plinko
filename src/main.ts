@@ -65,7 +65,7 @@ async function boot() {
   });
   const rebuild = (r: number, k: Risk) => {
     board.build(r, k);
-    mascot?.place(board.bounds.halfWidth, board.bounds.bottom);
+    mascot?.place(board.bounds);
   };
 
   let rows = Number($<HTMLInputElement>("rows").value);

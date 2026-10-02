@@ -144,7 +144,8 @@ The pegs are a single `InstancedMesh`. The ball follows a choreographed path of 
 
 - **Transitions.** Clips dissolve into each other in one shader pass that blends premultiplied colour. The mascot stays solid mid-blend, and a reaction fades back into the idle just before it ends.
 - **Priorities.** Reactions never interrupt a more important one, so a big win isn't cut off by the next drop.
-- **Formats.** Chrome, Firefox and Android get WebM VP9 with alpha. Every Apple WebKit browser, including Chrome and Firefox on iPhone, gets HEVC with alpha.
+- **Format.** Every browser gets the same H.264 MP4 with "stacked alpha": the colour frame on top and its alpha as grey below, recombined in the shader. Video with a real alpha channel doesn't work here, because iOS drops the alpha of HEVC video uploaded to WebGL.
+- **Size.** On a small screen the mascot grows to stay readable, as far as it can without covering the leftmost bucket.
 - **iOS.** iOS doesn't preload video, so the clips are warmed up by playing them muted. If Low Power Mode blocks autoplay, they start on the first tap.
 - **Fallback.** The earlier spring-driven 3D mascot (`Mascot.ts`) takes over if the clips can't load.
 
@@ -196,7 +197,7 @@ The source is `art/models/jungle-plinko-props.blend`, and `public/models/manifes
 1. **Reference pose.** Nano Banana redraws the mascot from the cover art in a neutral, full-body pose on a green screen.
 2. **Clips.** An image-to-video model animates one clip per reaction from that pose. With a model that also takes a last frame, such as `kwaivgi/kling-v3.0-std`, every clip also ends on the pose. Otherwise the idle plays as a ping-pong loop.
 3. **Key.** A local keyer removes the screen by how much green dominates red and blue, so even a dull green comes off cleanly. It also un-mixes and despills the fur edges.
-4. **Encode.** It writes WebM VP9 with alpha and HEVC with alpha to `public/mascot/`.
+4. **Encode.** It writes one stacked-alpha H.264 MP4 per clip to `public/mascot/`.
 
 ```bash
 npm run mascot -- ref                                  # the reference pose
@@ -249,7 +250,7 @@ scripts/
 public/
   art/                  game-ready 2D art (WebP) + manifest
   models/               3D props (GLB) + manifest
-  mascot/               mascot clips (WebM VP9 + HEVC, with alpha)
+  mascot/               mascot clips (H.264 MP4, alpha stacked under the colour)
   audio/                music, ambience and effects + CREDITS.md
 art/models/             Blender source of the 3D props
 docs/                   README media

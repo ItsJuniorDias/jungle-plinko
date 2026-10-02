@@ -6,8 +6,8 @@
  *     takes a last frame, so clips chain without a jump. With a first-frame-only model, the
  *     idle is made seamless as a ping-pong (forward, then reversed) and the game crossfades
  *     reactions back to the idle.
- *  3. Local green-screen key (free) → web encodes with alpha in public/mascot/:
- *     WebM VP9 (Chrome, Firefox, Android) and HEVC .mov (Safari, iOS).
+ *  3. Local green-screen key (free) → one H.264 .mp4 per clip in public/mascot/, with the alpha
+ *     stacked under the colour (iOS drops the alpha of HEVC video uploaded to WebGL).
  *
  *   npm run mascot -- ref              # the reference pose (needed once)
  *   npm run mascot -- idle happy       # these clips (skips steps whose output exists)
@@ -35,6 +35,7 @@ const OUT = "public/mascot";
 const REF_SOURCE = "art/ref/mascot.png";
 const REF = `${RAW}/ref.png`;
 const SIZE = 512; // game encode, square
+const CLIP_GAP = 16; // black rows between the colour and alpha halves
 
 const STATIC =
   " Static locked-off camera: no camera movement, no zoom, no cuts. The flat green-screen background stays perfectly uniform and " +
@@ -299,13 +300,19 @@ async function keyAndEncode(name: string, raw: string, pingPong: boolean) {
     loop +
     `scale=${SIZE}:${SIZE}:force_original_aspect_ratio=decrease:flags=lanczos,` +
     `pad=${SIZE}:${SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
-  const input = ["-y", "-loglevel", "error", "-i", keyed];
-  execFileSync("ffmpeg", [...input, "-vf", `${fit},format=yuva420p`, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", "34", "-row-mt", "1", `${OUT}/${name}.webm`]);
+  // Stacked alpha (src/games/plinko/VideoMascot.ts reads it): colour on top, alpha as grey
+  // CLIP_GAP rows below it, in plain H.264 that every browser can upload to WebGL.
+  const stack =
+    `[0]${fit},format=rgba,split[c][a];[a]alphaextract,format=rgb24[al];` +
+    `[c]format=rgb24,pad=${SIZE}:${SIZE * 2 + CLIP_GAP}:0:0:black[top];[top][al]overlay=0:${SIZE + CLIP_GAP},` +
+    "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p";
   execFileSync("ffmpeg", [
-    ...input, "-vf", `${fit},format=bgra`,
-    "-c:v", "hevc_videotoolbox", "-alpha_quality", "0.8", "-q:v", "60", "-allow_sw", "1", "-tag:v", "hvc1", `${OUT}/${name}.mov`,
+    "-y", "-loglevel", "error", "-i", keyed, "-filter_complex", stack,
+    "-c:v", "libx264", "-preset", "slow", "-crf", "24", "-profile:v", "high",
+    "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
+    "-movflags", "+faststart", "-an", `${OUT}/${name}.mp4`,
   ]);
-  console.log(`  → ${OUT}/${name}.webm, ${OUT}/${name}.mov`);
+  console.log(`  → ${OUT}/${name}.mp4`);
 }
 
 async function main() {

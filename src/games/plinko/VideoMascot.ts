@@ -8,6 +8,7 @@
 import * as THREE from "three";
 import gsap from "gsap";
 import type { Stage } from "../../engine/stage";
+import type { BoardBounds } from "./PlinkoBoard";
 
 type Clip = "idle" | "drop" | "tension" | "happy" | "bigWin" | "sad";
 const CLIPS: Clip[] = ["idle", "drop", "tension", "happy", "bigWin", "sad"];
@@ -17,16 +18,21 @@ const HEIGHT = 3.2; // character height in world units (the 3D mascot is 2.6)
 const FRAME = HEIGHT / 0.72; // the character fills ~72% of the square clip
 const FEET = 0.36; // its feet sit this far (in frames) below the clip's centre
 const FADE = 0.4;
+/** The idle pose's ear tip, right of the clip's centre (in frames). */
+const IDLE_RIGHT = 0.31;
+/** On a small screen the mascot grows to at least this many CSS pixels tall, room permitting. */
+const MIN_SCREEN_HEIGHT = 110;
+/** World units kept between the mascot's ear and the leftmost bucket. */
+const BUCKET_GAP = 0.15;
 
 /**
- * Apple's WebKit plays HEVC with alpha (.mov) but not VP9 with alpha. That is Safari on the Mac
- * and every browser on iPhone and iPad (Chrome and Firefox there are WebKit too); the other
- * browsers get VP9 with alpha (.webm).
+ * The clips are "stacked alpha" H.264: the colour frame on top, its alpha as grey below, with a
+ * black gap so filtering never bleeds one into the other (layout set by scripts/mascot-video.ts).
+ * Video with a real alpha channel can't be used: iOS drops HEVC's alpha when it uploads a frame
+ * to WebGL (the mascot showed on a black square), and plain H.264 plays in every browser.
  */
-const ua = navigator.userAgent;
-const appleWebKit =
-  /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) || /^((?!chrome|android|edg).)*safari/i.test(ua);
-const EXT = appleWebKit ? "mov" : "webm";
+const CLIP_SIZE = 512;
+const CLIP_GAP = 16;
 
 function loadVideo(clip: Clip): HTMLVideoElement {
   const video = document.createElement("video");
@@ -37,7 +43,7 @@ function loadVideo(clip: Clip): HTMLVideoElement {
   video.setAttribute("playsinline", "");
   video.preload = "auto";
   video.loop = clip === "idle";
-  video.src = `/mascot/${clip}.${EXT}`;
+  video.src = `/mascot/${clip}.mp4`;
   return video;
 }
 
@@ -61,19 +67,32 @@ function warmUp(video: HTMLVideoElement, inUse: () => boolean) {
  * both frames show the mascot it stays opaque (two faded planes would turn see-through).
  */
 function addDissolve(mat: THREE.MeshBasicMaterial, u: { uTo: { value: THREE.Texture | null }; uMix: { value: number } }) {
+  // Texture v of each half (flipY: v = 1 is the video's top row).
+  const height = CLIP_SIZE * 2 + CLIP_GAP;
+  const colourV0 = ((CLIP_SIZE + CLIP_GAP) / height).toFixed(6);
+  const alphaV1 = (CLIP_SIZE / height).toFixed(6);
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, u);
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\nuniform sampler2D uTo;\nuniform float uMix;")
+      .replace(
+        "#include <common>",
+        `#include <common>
+        uniform sampler2D uTo;
+        uniform float uMix;
+        vec4 stackedAlpha(sampler2D tex, vec2 uv) {
+          vec4 colour = vec4(texture2D(tex, vec2(uv.x, ${colourV0} + uv.y * (1.0 - ${colourV0}))).rgb, 1.0);
+          #ifdef DECODE_VIDEO_TEXTURE
+          // Video frames are sRGB-decoded in the shader (three's map_fragment does the same).
+          colour = sRGBTransferEOTF(colour);
+          #endif
+          // Alpha is stored as is, so it skips the sRGB decode.
+          return vec4(colour.rgb, texture2D(tex, vec2(uv.x, uv.y * ${alphaV1})).g);
+        }`,
+      )
       .replace(
         "#include <map_fragment>",
-        `vec4 fromC = texture2D(map, vMapUv);
-        vec4 toC = texture2D(uTo, vMapUv);
-        #ifdef DECODE_VIDEO_TEXTURE
-        // Video frames are sRGB-decoded in the shader (three's map_fragment does the same).
-        fromC = sRGBTransferEOTF(fromC);
-        toC = sRGBTransferEOTF(toC);
-        #endif
+        `vec4 fromC = stackedAlpha(map, vMapUv);
+        vec4 toC = stackedAlpha(uTo, vMapUv);
         float mixA = mix(fromC.a, toC.a, uMix);
         diffuseColor *= vec4(mix(fromC.rgb * fromC.a, toC.rgb * toC.a, uMix) / max(mixA, 1e-4), mixA);`,
       );
@@ -91,6 +110,7 @@ export class VideoMascot {
   private from: Clip = "idle";
   private to: Clip = "idle";
   private current: Clip = "idle";
+  private bounds?: BoardBounds;
 
   /**
    * Resolves once the idle can play, or undefined when the clips are missing. When the browser
@@ -156,10 +176,10 @@ export class VideoMascot {
   }
 
   /** Where the mascot sits; called whenever the board is rebuilt. */
-  place(boardHalfWidth: number, groundY: number) {
-    this.root.userData.boardHalfWidth = boardHalfWidth;
+  place(bounds: BoardBounds) {
+    this.bounds = bounds;
     // Perch on the frame's lower corner, in front of the tilted board's bottom edge.
-    this.root.position.y = groundY + 1.5;
+    this.root.position.y = bounds.bottom + 1.5;
     this.root.position.z = 2.4;
   }
 
@@ -239,12 +259,27 @@ export class VideoMascot {
     }
   }
 
-  /** Beside the frame when there is room; otherwise over its lower-left corner, a bit smaller. */
+  /**
+   * Beside the frame when there is room; otherwise over its lower-left corner. On a small screen
+   * (a phone) it grows to stay readable, as far as it can without covering the leftmost bucket.
+   */
   private fitToView() {
-    const { halfW } = this.stage.viewHalfSize(this.root.position.z);
-    const boardHalf: number = this.root.userData.boardHalfWidth ?? 6;
-    const portrait = this.stage.camera.aspect < 1;
-    this.root.position.x = -Math.min(boardHalf + HEIGHT * 0.5, halfW - HEIGHT * 0.42);
-    this.root.scale.setScalar(portrait ? 0.8 : 1);
+    const z = this.root.position.z;
+    const { halfW, halfH } = this.stage.viewHalfSize(z);
+    const boardHalf = this.bounds?.halfWidth ?? 6;
+    if (this.stage.camera.aspect < 1) {
+      this.root.position.x = -Math.min(boardHalf + HEIGHT * 0.5, halfW - HEIGHT * 0.42);
+      this.root.scale.setScalar(0.8);
+      return;
+    }
+    let scale = Math.max(1, MIN_SCREEN_HEIGHT / ((HEIGHT * this.stage.renderer.domElement.clientHeight) / (2 * halfH)));
+    if (scale > 1 && this.bounds) {
+      // The bucket edge seen at the mascot's depth (the resting camera looks along x = 0).
+      const edge = this.bounds.bucketEdge;
+      const clearX = (edge.x * halfW) / this.stage.viewHalfSize(edge.z).halfW - BUCKET_GAP;
+      scale = Math.max(1, Math.min(scale, (clearX + halfW) / (HEIGHT * 0.42 + IDLE_RIGHT * FRAME)));
+    }
+    this.root.position.x = -Math.min(boardHalf + HEIGHT * 0.5 * scale, halfW - HEIGHT * 0.42 * scale);
+    this.root.scale.setScalar(scale);
   }
 }

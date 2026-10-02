@@ -11,3 +11,4 @@ dist
 # Raw AI outputs (~14 MB). Kept locally so `npm run art` can re-key without paying again.
 art/raw/
 art/ref/
+art/previews/

@@ -14,3 +14,5 @@ art/ref/
 art/previews/
 # Raw AI mascot clips (generated + mattes). The web encodes live in public/mascot/.
 art/mascot-video/
+# Source sounds as downloaded (Pixabay); the game uses the processed copies in public/audio/.
+art/audio/

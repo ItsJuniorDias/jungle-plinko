@@ -59,6 +59,10 @@ async function boot() {
     board.onPegHit = () => board.activeBalls === 1 && mascot.onPegHit();
     stage.onUpdate(() => mascot.watch(board.watchX()));
   }
+  // Soft tap on every button, toggle and slider.
+  document.addEventListener("pointerdown", (e) => {
+    if ((e.target as Element).closest("button, input[type=range]")) sfx.click();
+  });
   const rebuild = (r: number, k: Risk) => {
     board.build(r, k);
     mascot?.place(board.bounds.halfWidth, board.bounds.bottom);

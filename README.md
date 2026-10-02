@@ -31,7 +31,7 @@
   - The ball stretches along its velocity and squashes on every peg, throwing sparks while the peg pulses and sways like a spring.
   - Bucket plaques swing like a struck gong and send a ripple through their neighbours; the board frame flashes in the bucket's colour.
   - A multiplier floats up from the bucket on every hit of 2× or more, and big hits (10× and up) open a Big / Mega / Epic win banner.
-  - Stereo-panned synth sound effects.
+  - Curated sound: a calm magical music loop over jungle ambience, kalimba pegs that climb a pentatonic scale as the ball falls, chimes by payout tier, and a fanfare that ducks the music on big wins. Losses get a soft, neutral wood "tok" and never a jingle. Sounds are panned to where they happen, and each one has a voice limit so autobet stays clean.
 - **AI art pipeline.** One command generates every image with Nano Banana via OpenRouter, keeps a consistent style and keys out the backgrounds. Most missing images fall back to a procedural placeholder.
 - **Responsive and accessible.** Works on phones, has keyboard shortcuts and ARIA labels, and respects `prefers-reduced-motion`.
 
@@ -74,6 +74,7 @@ Without it, the API answers `server_misconfigured`. Changing it later signs ever
 | `npm run simulate -- 200000` | Monte Carlo RTP check: simulated vs theoretical for 8, 12 and 16 rows at every risk level (default 50,000 bets each) |
 | `npm run art` | Generate any missing AI art (see [Art pipeline](#art-pipeline)) |
 | `npm run mascot` | Generate the mascot's AI video clips (see [Mascot animation](#mascot-animation)) |
+| `npm run audio` | Rebuild `public/audio/` from the curated sources in `art/audio/` (see [Audio](#audio)) |
 
 ## How it works
 
@@ -125,7 +126,7 @@ src/
     particles.ts        pooled additive particle bursts (one draw call)
     painted.ts          procedural placeholder textures and canvas labels
     art.ts              loads public/art/manifest.json (all entries optional)
-    sfx.ts              Web Audio synth sound kit
+    sfx.ts              Web Audio mixer: music/ambience loops, one-shots, ducking, synth fallback
   games/plinko/
     PlinkoBoard.ts      board, pegs, buckets, ball choreography, win popups, frame glow
     VideoMascot.ts      the mascot as AI video clips with alpha: idle loop + crossfaded reactions
@@ -190,6 +191,16 @@ npm run mascot -- happy --force                # regenerate one clip (spends cre
 It needs `OPENROUTER_API_KEY` in `.env`. Raw clips are kept in `art/mascot-video/` (git-ignored), so re-running without `--force` only re-keys and re-encodes.
 
 `src/engine/art.ts` loads `public/models/manifest.json`; every model is optional and falls back to the 2D sprite or procedural version.
+
+## Audio
+
+The music and sound effects are curated from [Pixabay](https://pixabay.com) (free for commercial use, no attribution required). `public/audio/CREDITS.md` lists every source. The originals go in `art/audio/` (git-ignored, because the license forbids redistributing them as standalone files). `npm run audio` (`scripts/process-audio.ts`) turns them into the game's files:
+
+- **One-shots** are cut to the useful part, faded and peak-normalized, and are mostly mono because the game pans them.
+- **The music** is loudness-normalized and kept whole, since it is made to loop.
+- **The ambience** is baked into a 60 s loop with an equal-power crossfade at the seam.
+
+At runtime, `src/engine/sfx.ts` mixes music, ambience and effects on separate buses. Audio starts on the player's first tap or key press (browser autoplay rules) and pauses while the tab is hidden. Any missing file falls back to a small synthesized tone.
 
 ## Roadmap
 
